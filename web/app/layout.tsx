@@ -1,0 +1,28 @@
+import type { Metadata } from 'next'
+import { QueryProvider } from '@/context/query-client'
+import { ToastProvider } from '@/app/components/base/toast'
+import SourceAttribution from '@/app/components/base/source-attribution'
+import '@/styles/globals.css'
+
+export const metadata: Metadata = {
+  title: 'OpenAgent',
+  description: 'OpenAgent Multi-tenant Management Platform',
+}
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  return (
+    <html lang="zh-CN">
+      <body>
+        <QueryProvider>
+          <ToastProvider>{children}</ToastProvider>
+        </QueryProvider>
+        {/* AGPLv3 §13 source-availability notice — keep this on every page. */}
+        <SourceAttribution />
+      </body>
+    </html>
+  )
+}

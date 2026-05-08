@@ -1,0 +1,16 @@
+from app.models.tenant import Tenant  # noqa: F401
+from app.models.password_reset_code import PasswordResetCode  # noqa: F401
+from app.models.knowledge_base import KnowledgeBase  # noqa: F401
+from app.models.document import Document  # noqa: F401
+from app.models.slice import Slice  # noqa: F401
+from app.models.sync_log import SyncLog  # noqa: F401
+from app.models.agent import Agent  # noqa: F401
+from app.models.agent_tool import AgentTool  # noqa: F401
+from app.models.super_admin import SuperAdmin  # noqa: F401
+from app.models.api_key import ApiKey  # noqa: F401
+from app.models.conversation import Conversation  # noqa: F401
+from app.models.conversation_step import ConversationStep  # noqa: F401
+from app.models.channel import Channel  # noqa: F401
+from app.models.kb_permission_rule import KbPermissionRule  # noqa: F401
+from app.models.help_center import HelpCenter  # noqa: F401
+from app.models.help_center_tab import HelpCenterTab  # noqa: F401

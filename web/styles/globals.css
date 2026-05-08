@@ -1,0 +1,158 @@
+@import "tailwindcss";
+
+@theme {
+  /* Neutral gray design system — no hue bias */
+  --color-background: #FFFFFF;
+  --color-foreground: #1a1a1a;
+
+  --color-primary: #1a1a1a;
+  --color-primary-foreground: #FFFFFF;
+
+  --color-secondary: #F5F5F5;
+  --color-secondary-foreground: #1a1a1a;
+
+  --color-destructive: #DC2626;
+  --color-destructive-foreground: #FFFFFF;
+
+  --color-muted: #F5F5F5;
+  --color-muted-foreground: #737373;
+
+  --color-accent: #F0F0F0;
+  --color-accent-foreground: #1a1a1a;
+
+  --color-border: #E5E5E5;
+  --color-input: #E5E5E5;
+  --color-ring: #1a1a1a;
+
+  --color-card: #FFFFFF;
+  --color-card-foreground: #1a1a1a;
+
+  --color-surface: #FAFAFA;
+
+  --radius: 0.5rem;
+
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Fira Code", ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+    Consolas, monospace;
+  --font-display: "Plus Jakarta Sans", "Inter", -apple-system, sans-serif;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Snappy typing-indicator bounce (faster than default Tailwind bounce) */
+@keyframes thinking-dot-pop {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(0, -5px, 0);
+  }
+}
+
+/* Streaming cursor dot — gentle pulse between dark and light gray */
+@keyframes streaming-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* Streaming cursor dot — inserted by JS after the last text node in markdown */
+.streaming-dot-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 3px;
+  border-radius: 50%;
+  background-color: #6B7280;
+  vertical-align: middle;
+  animation: streaming-dot 1.2s ease-in-out infinite;
+}
+
+/* Visitor-site Markdown body — minimal Tailwind-friendly typography. */
+.prose-doc {
+  color: #1a1a1a;
+  line-height: 1.75;
+  font-size: 15px;
+}
+.prose-doc h1,
+.prose-doc h2,
+.prose-doc h3,
+.prose-doc h4 {
+  font-weight: 600;
+  color: #1a1a1a;
+  line-height: 1.3;
+  margin-top: 1.6em;
+  margin-bottom: 0.6em;
+}
+.prose-doc h1 { font-size: 1.75em; }
+.prose-doc h2 { font-size: 1.4em; border-bottom: 1px solid #E4E4E7; padding-bottom: 0.25em; }
+.prose-doc h3 { font-size: 1.2em; }
+.prose-doc h4 { font-size: 1.05em; }
+.prose-doc p,
+.prose-doc ul,
+.prose-doc ol,
+.prose-doc blockquote,
+.prose-doc pre,
+.prose-doc table {
+  margin: 1em 0;
+}
+.prose-doc ul,
+.prose-doc ol { padding-left: 1.5em; }
+.prose-doc li { margin: 0.3em 0; }
+.prose-doc ul > li { list-style: disc; }
+.prose-doc ol > li { list-style: decimal; }
+.prose-doc a {
+  color: #1a1a1a;
+  overflow-wrap: anywhere;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.prose-doc a:hover { opacity: 0.7; }
+.prose-doc code {
+  font-family: var(--font-mono);
+  background: #F4F4F5;
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-size: 0.9em;
+}
+.prose-doc pre {
+  background: #18181B;
+  color: #FAFAFA;
+  padding: 1em 1.25em;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 0.9em;
+}
+.prose-doc pre code { background: transparent; color: inherit; padding: 0; font-size: inherit; }
+.prose-doc blockquote {
+  border-left: 3px solid #E4E4E7;
+  padding-left: 1em;
+  color: #525252;
+  font-style: italic;
+}
+.prose-doc table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+.prose-doc th,
+.prose-doc td {
+  border: 1px solid #E4E4E7;
+  padding: 0.5em 0.75em;
+  text-align: left;
+}
+.prose-doc th { background: #FAFAFA; font-weight: 600; }
+.prose-doc img { max-width: 100%; height: auto; border-radius: 6px; }
+.prose-doc hr { border: 0; border-top: 1px solid #E4E4E7; margin: 2em 0; }

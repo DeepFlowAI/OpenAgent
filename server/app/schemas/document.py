@@ -1,0 +1,72 @@
+"""
+Document & Slice query schemas
+"""
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict
+
+from app.schemas.base import PaginatedResponse
+
+
+class DocumentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    knowledge_base_id: int
+    tenant_id: str
+    title: str | None = None
+    description: str | None = None
+    file_path: str
+    source_url: str | None = None
+    markdown_content: str | None = None
+    doc_meta: dict[str, Any] | None = None
+    toc: list[dict] | None = None
+    slice_count: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class DocumentListResponse(PaginatedResponse):
+    items: list[DocumentResponse]
+
+
+class SliceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    document_id: int
+    knowledge_base_id: int
+    content: str
+    content_for_search: str | None = None
+    toc_path: list[str] | None = None
+    slice_meta: dict[str, Any] | None = None
+    doc_meta: dict[str, Any] | None = None
+    source_url: str | None = None
+    markdown_url: str | None = None
+    slice_order: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class SliceListResponse(PaginatedResponse):
+    items: list[SliceResponse]
+
+
+class SyncLogResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    knowledge_base_id: int
+    tenant_id: str
+    status: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    total_files: int | None = None
+    success_count: int | None = None
+    error_count: int | None = None
+    details: dict | list[dict] | None = None
+
+
+class SyncLogListResponse(PaginatedResponse):
+    items: list[SyncLogResponse]

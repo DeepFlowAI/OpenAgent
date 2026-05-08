@@ -1,0 +1,41 @@
+# Core
+fastapi
+uvicorn[standard]
+pydantic-settings
+sqlalchemy[asyncio]
+asyncpg
+psycopg2-binary
+alembic
+python-multipart
+
+# Auth (optional)
+PyJWT
+passlib[bcrypt]
+
+# Redis
+redis
+
+# Knowledge Base - Git & Document Parsing
+gitpython
+pyyaml
+
+# LLM Gateway
+litellm
+
+# AI Search - Embedding & Vector
+pgvector
+httpx
+
+# OSS
+oss2
+
+# Observability — OpenTelemetry SDK + OTLP/HTTP exporter
+# (Vendor-neutral: works with SigNoz, Honeycomb, Tempo, etc.)
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-http
+
+# Testing
+httpx
+pytest
+pytest-asyncio
