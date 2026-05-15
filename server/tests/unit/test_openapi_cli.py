@@ -20,6 +20,7 @@ class TestOpenApiCliCatalog:
         keys = [endpoint.key for endpoint in ENDPOINTS]
 
         assert len(keys) == len(set(keys))
+        assert "knowledge.list" in keys
         assert "chat.stream" in keys
         assert "agents.list" in keys
         assert "channels.secret_key" in keys
@@ -47,15 +48,15 @@ class TestOpenApiCliJsonPayload:
 class TestOpenApiCliClient:
     def test_build_url_formats_path_and_query(self) -> None:
         client = OpenApiClient("http://localhost:5001/", "sk-test")
-        endpoint = get_endpoint("conversations.list")
+        endpoint = get_endpoint("knowledge.documents")
 
         url = client._build_url(
             endpoint,
-            {"agent_id": 1},
+            {"kb_id": 1},
             {"page": 2, "per_page": 20, "source": None},
         )
 
-        assert url == "http://localhost:5001/api/v1/agents/1/conversations?page=2&per_page=20"
+        assert url == "http://localhost:5001/api/v1/knowledge-bases/1/documents?page=2&per_page=20"
 
     def test_missing_api_key_is_rejected_before_request(self) -> None:
         client = OpenApiClient("http://localhost:5001", None)

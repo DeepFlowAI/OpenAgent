@@ -109,6 +109,7 @@ class PublicHelpCenterService:
         docs, total = await PublicHelpCenterRepository.list_docs_for_tab(
             db, tab, page, per_page
         )
+        nav = await PublicHelpCenterRepository.get_nav_config_for_tab(db, tab)
         pages = (total + per_page - 1) // per_page if per_page > 0 else 1
         return {
             "items": [_doc_summary(d) for d in docs],
@@ -116,6 +117,7 @@ class PublicHelpCenterService:
             "page": page,
             "per_page": per_page,
             "pages": pages,
+            "nav": nav,
         }
 
     @staticmethod

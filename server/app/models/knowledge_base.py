@@ -27,6 +27,7 @@ class KnowledgeBase(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     schema_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     schema_fields: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    nav_config: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         Index("ix_knowledge_bases_tenant_id", "tenant_id"),

@@ -2,7 +2,12 @@
 
 import { useState, useMemo, useCallback, useEffect } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
-import { useConversations } from '@/service/use-conversation'
+import {
+  exportConversations,
+  useConversations,
+  type ConversationListParams,
+} from '@/service/use-conversation'
+import { getErrorMessage } from '@/service/base'
 import { useAuthStore } from '@/context/auth-store'
 import { Badge } from '@/app/components/base/badge'
 import { SOURCE_LABELS, STATUS_LABELS } from '@/models/conversation'
@@ -12,6 +17,7 @@ import {
   IconChevronRight,
   IconCopy,
   IconCheck,
+  IconDownload,
 } from '@tabler/icons-react'
 import { ConversationDrawer } from '@/app/components/features/conversation-drawer'
 
@@ -24,6 +30,18 @@ function useDebounce<T>(value: T, delay: number): T {
     return () => clearTimeout(timer)
   }, [value, delay])
   return debounced
+}
+
+function formatExportTimestamp(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    '-',
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+  ].join('')
 }
 
 export default function ConversationsPage() {
@@ -45,16 +63,21 @@ export default function ConversationsPage() {
 
   // Drawer
   const [selectedConversation, setSelectedConversation] = useState<Conversation | null>(null)
+  const [exporting, setExporting] = useState(false)
+
+  const exportParams: Omit<ConversationListParams, 'page' | 'per_page'> = useMemo(() => ({
+    ...(statusFilter ? { status_filter: statusFilter } : {}),
+    ...(sourceFilter ? { source: sourceFilter } : {}),
+    ...(debouncedConversationId ? { conversation_id: debouncedConversationId.trim() } : {}),
+    ...(debouncedUserId ? { external_user_id: debouncedUserId.trim() } : {}),
+  }), [statusFilter, sourceFilter, debouncedConversationId, debouncedUserId])
 
   // Build query params
   const queryParams = useMemo(() => ({
     page,
     per_page: perPage,
-    ...(statusFilter ? { status_filter: statusFilter } : {}),
-    ...(sourceFilter ? { source: sourceFilter } : {}),
-    ...(debouncedConversationId ? { conversation_id: debouncedConversationId.trim() } : {}),
-    ...(debouncedUserId ? { external_user_id: debouncedUserId.trim() } : {}),
-  }), [page, perPage, statusFilter, sourceFilter, debouncedConversationId, debouncedUserId])
+    ...exportParams,
+  }), [page, perPage, exportParams])
 
   const { data, isLoading } = useConversations(agentId, tenantId, queryParams)
 
@@ -102,6 +125,27 @@ export default function ConversationsPage() {
   const handleRowClick = useCallback((conv: Conversation) => {
     setSelectedConversation(conv)
   }, [])
+
+  const handleExport = useCallback(async () => {
+    if (!agentId || !tenantId || total === 0) return
+
+    setExporting(true)
+    try {
+      const blob = await exportConversations(agentId, tenantId, exportParams)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `conversations-${agentId}-${formatExportTimestamp(new Date())}.csv`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    } catch (error) {
+      window.alert(await getErrorMessage(error))
+    } finally {
+      setExporting(false)
+    }
+  }, [agentId, tenantId, total, exportParams])
 
   // Page range for pagination
   const pageRange = useMemo(() => {
@@ -163,6 +207,17 @@ export default function ConversationsPage() {
             placeholder="搜索用户"
             className="h-9 w-40 rounded-lg border border-[#E5E5E5] bg-white px-3 text-sm text-[#1a1a1a] placeholder:text-[#A3A3A3] outline-none focus:border-[#1a1a1a]"
           />
+
+          <button
+            type="button"
+            onClick={handleExport}
+            disabled={isLoading || exporting || total === 0}
+            className="ml-auto flex h-9 items-center gap-1.5 rounded-lg border border-[#E5E5E5] bg-white px-3 text-sm text-[#404040] transition-colors hover:bg-[#F7F7F7] disabled:cursor-not-allowed disabled:opacity-50"
+            title="导出当前筛选条件下的全部会话消息"
+          >
+            <IconDownload size={16} />
+            {exporting ? '导出中...' : '导出消息'}
+          </button>
         </div>
 
         {/* Table */}

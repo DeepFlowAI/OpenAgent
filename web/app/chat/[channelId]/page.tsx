@@ -50,6 +50,10 @@ type AppearanceCfg = {
   pcMemberLogo?: string
   mobileLogo?: string
   mobileMemberLogo?: string
+  headerCustomButtonImage?: string
+  headerCustomButtonUrl?: string
+  headerMemberCustomButtonImage?: string
+  headerMemberCustomButtonUrl?: string
   title?: string
   pcTitleColor?: string
   headerBgColor?: string
@@ -61,6 +65,8 @@ type AppearanceCfg = {
   messageAreaBgColor?: string
   pcEmptyStateImage?: string
   mobileEmptyStateImage?: string
+  pcMemberEmptyStateImage?: string
+  mobileMemberEmptyStateImage?: string
   sendMessageButtonBgColor?: string
   sendMessageButtonIconColor?: string
   stopMessageButtonBgColor?: string
@@ -297,6 +303,39 @@ function parseRadius(v?: string, fallback = '10') {
   return `${parts[0]}px`
 }
 
+function HeaderCustomButton({ imageUrl, href }: { imageUrl: string; href: string }) {
+  const [failed, setFailed] = useState(false)
+  const img = (imageUrl || '').trim()
+  if (!img || failed) return null
+  const rawHref = (href || '').trim()
+  const isHttp = /^https?:\/\//i.test(rawHref)
+  const className =
+    'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-black/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-black/20 [-webkit-tap-highlight-color:transparent]'
+  const inner = (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={img}
+      alt=""
+      className="max-h-7 max-w-7 object-contain"
+      onError={() => setFailed(true)}
+    />
+  )
+  if (isHttp) {
+    return (
+      <a
+        href={rawHref}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={className}
+        aria-label="自定义链接"
+      >
+        {inner}
+      </a>
+    )
+  }
+  return <span className={className}>{inner}</span>
+}
+
 // ─── Sidebar content (shared desktop + overlay) ───────────
 
 function SidebarContent({
@@ -304,6 +343,9 @@ function SidebarContent({
   logoSrc,
   titleText,
   titleColor,
+  headerCustomButtonImage,
+  headerCustomButtonUrl,
+  isEmbed,
   storedConvs,
   activeConvId,
   onNewChat,
@@ -313,6 +355,9 @@ function SidebarContent({
   logoSrc: string
   titleText: string
   titleColor: string
+  headerCustomButtonImage: string
+  headerCustomButtonUrl: string
+  isEmbed: boolean
   storedConvs: StoredConv[]
   activeConvId: number | null
   onNewChat: () => void
@@ -322,20 +367,29 @@ function SidebarContent({
     <>
       <div className="flex flex-col gap-4 px-5 pb-0 pt-4">
         <div className="flex min-h-0 min-w-0 items-center gap-2">
-          {logoSrc ? (
-            <img
-              src={logoSrc}
-              alt=""
-              className="max-h-8 h-auto w-auto max-w-full shrink-0 rounded object-contain"
-            />
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            {logoSrc ? (
+              <img
+                src={logoSrc}
+                alt=""
+                className="max-h-8 h-auto w-auto max-w-full shrink-0 rounded object-contain"
+              />
+            ) : (
+              <IconHeadset size={22} className="shrink-0" />
+            )}
+            {titleText ? (
+              <span className="min-w-0 truncate text-base font-bold" style={{ color: titleColor }}>
+                {titleText}
+              </span>
+            ) : null}
+          </div>
+          {isEmbed ? (
+            <div className="shrink-0 md:hidden">
+              <HeaderCustomButton imageUrl={headerCustomButtonImage} href={headerCustomButtonUrl} />
+            </div>
           ) : (
-            <IconHeadset size={22} className="shrink-0" />
+            <HeaderCustomButton imageUrl={headerCustomButtonImage} href={headerCustomButtonUrl} />
           )}
-          {titleText ? (
-            <span className="min-w-0 truncate text-base font-bold" style={{ color: titleColor }}>
-              {titleText}
-            </span>
-          ) : null}
         </div>
         <button
           type="button"
@@ -489,8 +543,25 @@ export default function ChatPage() {
   const mobileHeaderLogo = isMember
     ? (appearance.mobileMemberLogo || defaultMobileLogo)
     : defaultMobileLogo
-  const pcEmptyStateImage = (appearance.pcEmptyStateImage || '').trim() || sidebarLogo
-  const mobileEmptyStateImage = (appearance.mobileEmptyStateImage || '').trim() || mobileHeaderLogo
+  const defaultPcEmptyStateImage = (appearance.pcEmptyStateImage || '').trim() || sidebarLogo
+  const defaultMobileEmptyStateImage = (appearance.mobileEmptyStateImage || '').trim() || mobileHeaderLogo
+  const pcEmptyStateImage = isMember
+    ? ((appearance.pcMemberEmptyStateImage || '').trim() || defaultPcEmptyStateImage)
+    : defaultPcEmptyStateImage
+  const mobileEmptyStateImage = isMember
+    ? ((appearance.mobileMemberEmptyStateImage || '').trim() || defaultMobileEmptyStateImage)
+    : defaultMobileEmptyStateImage
+
+  const headerCustomBtnImg = (appearance.headerCustomButtonImage || '').trim()
+  const headerMemberCustomBtnImg = (appearance.headerMemberCustomButtonImage || '').trim()
+  const headerCustomBtnUrl = (appearance.headerCustomButtonUrl || '').trim()
+  const headerMemberCustomBtnUrl = (appearance.headerMemberCustomButtonUrl || '').trim()
+  const resolvedHeaderCustomImage = isMember
+    ? (headerMemberCustomBtnImg || headerCustomBtnImg)
+    : headerCustomBtnImg
+  const resolvedHeaderCustomUrl = isMember
+    ? (headerMemberCustomBtnUrl || headerCustomBtnUrl)
+    : headerCustomBtnUrl
 
   const behavior = useMemo<BehaviorCfg>(() => {
     const cfg = channel?.config as Record<string, unknown> | undefined
@@ -1087,6 +1158,9 @@ export default function ChatPage() {
             logoSrc={sidebarLogo}
             titleText={titleText}
             titleColor={pcTitleColor}
+            headerCustomButtonImage={resolvedHeaderCustomImage}
+            headerCustomButtonUrl={resolvedHeaderCustomUrl}
+            isEmbed={isEmbed}
             storedConvs={storedConvs}
             activeConvId={activeConvId}
             onNewChat={handleNewChat}
@@ -1119,6 +1193,9 @@ export default function ChatPage() {
               logoSrc={sidebarLogo}
               titleText={titleText}
               titleColor={pcTitleColor}
+              headerCustomButtonImage={resolvedHeaderCustomImage}
+              headerCustomButtonUrl={resolvedHeaderCustomUrl}
+              isEmbed={isEmbed}
               storedConvs={storedConvs}
               activeConvId={activeConvId}
               onNewChat={handleNewChat}
@@ -1152,8 +1229,8 @@ export default function ChatPage() {
             </button>
           </div>
           <div className="flex min-w-0 flex-1 items-center justify-center px-1">
-            {mobileHeaderLogo || titleText ? (
-              <div className="flex min-w-0 items-center justify-center gap-2">
+            {mobileHeaderLogo || titleText || (isEmbed && resolvedHeaderCustomImage) ? (
+              <div className="flex min-w-0 max-w-full items-center justify-center gap-2">
                 {mobileHeaderLogo ? (
                   // Slot is always 32px tall; object-contain may letterbox. With max-w on the slot,
                   // very wide logos scale down to fit width first, so the drawn bitmap can be shorter than 32px.
@@ -1172,6 +1249,15 @@ export default function ChatPage() {
                   >
                     {titleText}
                   </span>
+                ) : null}
+                {/* Mobile: custom button only in sidebar drawer; embed desktop (md+) keeps it in header center */}
+                {isEmbed ? (
+                  <div className="hidden shrink-0 md:flex">
+                    <HeaderCustomButton
+                      imageUrl={resolvedHeaderCustomImage}
+                      href={resolvedHeaderCustomUrl}
+                    />
+                  </div>
                 ) : null}
               </div>
             ) : null}

@@ -9,13 +9,14 @@ import {
   defaultExpandedKeys,
   type TreeNode,
 } from './doc-tree-utils'
-import type { PublicDocSummary } from '@/models/help-center'
+import type { NavEntry, PublicDocSummary } from '@/models/help-center'
 import { cn } from '@/utils/classnames'
 
 type Props = {
   slug: string
   tabSlug: string
   docs: PublicDocSummary[]
+  nav: NavEntry[] | null
 }
 
 const PATH_PREFIX_RE = (slug: string, tabSlug: string) =>
@@ -23,11 +24,11 @@ const PATH_PREFIX_RE = (slug: string, tabSlug: string) =>
 
 /**
  * Left-rail document tree shown on every visitor page within a tab. Tree
- * structure mirrors the docs' `file_path` layout. Folders containing the
- * currently-open document are auto-expanded; everything else is collapsed
- * to keep large knowledge bases scannable.
+ * structure mirrors the docs' `file_path` layout. First- and second-level
+ * folders open by default; deeper folders along the active doc path stay
+ * expanded so the current article remains visible in the rail.
  */
-export function DocTree({ slug, tabSlug, docs }: Props) {
+export function DocTree({ slug, tabSlug, docs, nav }: Props) {
   const pathname = usePathname()
   const linkPrefix = PATH_PREFIX_RE(slug, tabSlug)
 
@@ -48,7 +49,7 @@ export function DocTree({ slug, tabSlug, docs }: Props) {
       .join('/')
   }, [pathname, linkPrefix])
 
-  const tree = useMemo(() => buildDocTree(docs), [docs])
+  const tree = useMemo(() => buildDocTree(docs, nav), [docs, nav])
 
   const [expanded, setExpanded] = useState<Set<string>>(
     () => defaultExpandedKeys(tree, activeFilePath),

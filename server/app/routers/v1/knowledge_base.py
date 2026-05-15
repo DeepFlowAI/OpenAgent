@@ -1,15 +1,17 @@
 """
 KnowledgeBase router
 """
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.deps import get_db
+from app.core.exceptions import ForbiddenError
+from app.db.deps import AuthContext, get_db, resolve_auth
 from app.schemas.knowledge_base import (
     KnowledgeBaseCreate,
     KnowledgeBaseUpdate,
     KnowledgeBaseResponse,
     KnowledgeBaseListResponse,
+    PublicKnowledgeBaseListResponse,
 )
 from app.services.knowledge_base_service import KnowledgeBaseService
 from app.repositories.slice_repository import SliceRepository
@@ -17,15 +19,21 @@ from app.repositories.slice_repository import SliceRepository
 router = APIRouter(prefix="/knowledge-bases", tags=["KnowledgeBases"])
 
 
-@router.get("", response_model=KnowledgeBaseListResponse)
+@router.get("", response_model=KnowledgeBaseListResponse | PublicKnowledgeBaseListResponse)
 async def list_knowledge_bases(
-    tenant_id: str,
-    page: int = 1,
-    per_page: int = 10,
+    auth: AuthContext = Depends(resolve_auth),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
     """List knowledge bases for a tenant"""
-    return await KnowledgeBaseService.get_paginated(db, tenant_id, page, per_page)
+    if auth.scopes is not None:
+        if "chat" not in auth.scopes:
+            raise ForbiddenError("API key lacks required scope: chat")
+        return await KnowledgeBaseService.get_public_paginated(
+            db, auth.tenant_id, page, per_page
+        )
+    return await KnowledgeBaseService.get_paginated(db, auth.tenant_id, page, per_page)
 
 
 @router.post(

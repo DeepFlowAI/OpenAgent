@@ -20,6 +20,7 @@ import {
   IconCopy,
   IconCheck,
   IconTool,
+  IconDownload,
 } from '@tabler/icons-react'
 
 const MarkdownPreview = dynamic(() => import('@uiw/react-markdown-preview'), {
@@ -30,6 +31,127 @@ type RoundGroup = {
   roundNumber: number
   userMessage: StepTimelineItem | null
   agentSteps: StepTimelineItem[]
+}
+
+type ConversationExportRow = {
+  externalId: string
+  conversationId: number
+  startedAt: string
+  roundNumber: number
+  userStepId: number
+  clientMessageId: string
+  userCreatedAt: string
+  userContent: string
+  thinkingContent: string
+  assistantContent: string
+  inputTokens: number
+  outputTokens: number
+  roundHasError: boolean
+}
+
+const EXPORT_COLUMNS = [
+  '会话 ID',
+  '会话内部 ID',
+  '会话开始时间',
+  '轮次',
+  '用户消息 Step ID',
+  '客户端消息 ID',
+  '用户消息发送时间',
+  '用户消息内容',
+  'Agent 推理过程',
+  'Agent 消息内容',
+  '输入 Token',
+  '输出 Token',
+  'round_has_error',
+] as const
+
+function formatExportTimestamp(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    '-',
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+  ].join('')
+}
+
+function escapeCsvCell(value: string | number | boolean) {
+  const text = String(value)
+  if (!/[",\n\r]/.test(text)) return text
+  return `"${text.replaceAll('"', '""')}"`
+}
+
+function buildAgentReasoningExport(orderedAgentSteps: StepTimelineItem[]): string {
+  const segments: string[] = []
+  for (const step of orderedAgentSteps) {
+    if (step.step_type === 'llm_call') {
+      const t = step.thinking_content?.trim() ?? ''
+      if (t) segments.push(t)
+    } else if (step.step_type === 'tool_call') {
+      const brief = step.brief?.trim() ?? ''
+      const toolName = step.tool_name?.trim() ?? ''
+      segments.push(`tool：${brief || toolName || 'unknown'}`)
+    }
+  }
+  return segments.join('\n\n---\n\n')
+}
+
+function buildConversationExportRows(
+  conversation: { id: number; external_id: string; started_at: string | null },
+  rounds: RoundGroup[]
+): ConversationExportRow[] {
+  return rounds.flatMap((round) => {
+    if (!round.userMessage) return []
+
+    const orderedAgentSteps = [...round.agentSteps].sort((a, b) => a.step_order - b.step_order)
+    const llmSteps = orderedAgentSteps.filter((step) => step.step_type === 'llm_call')
+    const assistantSteps = orderedAgentSteps.filter((step) => step.step_type === 'assistant_message')
+    const roundSteps = [round.userMessage, ...orderedAgentSteps]
+
+    return [{
+      externalId: conversation.external_id,
+      conversationId: conversation.id,
+      startedAt: conversation.started_at ?? '',
+      roundNumber: round.roundNumber,
+      userStepId: round.userMessage.id,
+      clientMessageId: round.userMessage.client_message_id ?? '',
+      userCreatedAt: round.userMessage.created_at ?? '',
+      userContent: round.userMessage.content ?? '',
+      thinkingContent: buildAgentReasoningExport(orderedAgentSteps),
+      assistantContent: assistantSteps
+        .map((step) => step.content?.trim() ?? '')
+        .filter(Boolean)
+        .join('\n\n'),
+      inputTokens: llmSteps.reduce((sum, step) => sum + (step.input_tokens ?? 0), 0),
+      outputTokens: llmSteps.reduce((sum, step) => sum + (step.output_tokens ?? 0), 0),
+      roundHasError: roundSteps.some((step) => step.status !== 'success'),
+    }]
+  })
+}
+
+function buildConversationExportCsv(rows: ConversationExportRow[]) {
+  const lines = [
+    EXPORT_COLUMNS.join(','),
+    ...rows.map((row) => [
+      row.externalId,
+      row.conversationId,
+      row.startedAt,
+      row.roundNumber,
+      row.userStepId,
+      row.clientMessageId,
+      row.userCreatedAt,
+      row.userContent,
+      row.thinkingContent,
+      row.assistantContent,
+      row.inputTokens,
+      row.outputTokens,
+      row.roundHasError,
+    ].map(escapeCsvCell).join(',')),
+  ]
+
+  return `\uFEFF${lines.join('\n')}`
 }
 
 export default function ConversationLogPage() {
@@ -94,6 +216,27 @@ export default function ConversationLogPage() {
 
     return Array.from(roundMap.values()).sort((a, b) => a.roundNumber - b.roundNumber)
   }, [timeline])
+
+  const exportRows = useMemo(() => {
+    if (!conversation) return []
+    return buildConversationExportRows(conversation, rounds)
+  }, [conversation, rounds])
+
+  const handleExport = useCallback(() => {
+    if (!conversation || exportRows.length === 0) return
+
+    const csv = buildConversationExportCsv(exportRows)
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    const safeExternalId = conversation.external_id.replace(/[^a-zA-Z0-9._-]/g, '_')
+    link.href = url
+    link.download = `conversation-${safeExternalId}-${formatExportTimestamp(new Date())}.csv`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  }, [conversation, exportRows])
 
   // Find parent LLM step for a tool call
   const findParentLlm = useCallback(
@@ -286,6 +429,16 @@ export default function ConversationLogPage() {
           返回
         </button>
         <h1 className="text-base font-semibold text-[#18181B]">会话日志详情</h1>
+        <div className="flex-1" />
+        <button
+          onClick={handleExport}
+          disabled={!conversation || timelineLoading || exportRows.length === 0}
+          className="flex items-center gap-1.5 rounded-md border border-[#E5E5E5] bg-white px-3 py-1.5 text-sm text-[#404040] transition-colors hover:bg-[#F7F7F7] disabled:cursor-not-allowed disabled:opacity-50"
+          title={exportRows.length === 0 ? '暂无可导出的用户消息' : '导出当前会话 CSV'}
+        >
+          <IconDownload size={16} />
+          导出当前会话
+        </button>
       </div>
 
       {/* Main content area */}

@@ -72,7 +72,7 @@ export function TabDrawer({
 }) {
   const { toast } = useToast()
   const tenantId = useAuthStore((s) => s.user?.tenant_id) || ''
-  const { data: kbList } = useKnowledgeBases(tenantId, { per_page: 200 })
+  const { data: kbList } = useKnowledgeBases(tenantId, { per_page: 20 })
   const createMutation = useCreateHelpCenterTab(helpCenterId)
   const updateMutation = useUpdateHelpCenterTab(helpCenterId)
   const checkSlugMutation = useCheckTabSlug(helpCenterId)

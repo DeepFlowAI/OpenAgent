@@ -15,6 +15,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from app.models.document import Document
 from app.models.help_center import HelpCenter
 from app.models.help_center_tab import HelpCenterTab
+from app.models.knowledge_base import KnowledgeBase
 
 
 _ValueKind = Literal["bool", "number", "date", "text"]
@@ -295,3 +296,15 @@ class PublicHelpCenterRepository:
         stmt = stmt.order_by(Document.file_path.asc())
         result = await db.execute(stmt)
         return list(result.scalars().all())
+
+    @staticmethod
+    async def get_nav_config_for_tab(
+        db: AsyncSession, tab: HelpCenterTab
+    ) -> list | None:
+        """Return the nav_config from the KB backing this tab, or None."""
+        result = await db.execute(
+            select(KnowledgeBase.nav_config).where(
+                KnowledgeBase.id == tab.knowledge_base_id
+            )
+        )
+        return result.scalar_one_or_none()

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import type { PublicDocSummary } from '@/models/help-center'
+import type { NavEntry, PublicDocSummary } from '@/models/help-center'
 import { DocTree } from './doc-tree'
 
 const DEFAULT_WIDTH = 260
@@ -12,9 +12,10 @@ type Props = {
   slug: string
   tabSlug: string
   docs: PublicDocSummary[]
+  nav: NavEntry[] | null
 }
 
-export function ResizableDocSidebar({ slug, tabSlug, docs }: Props) {
+export function ResizableDocSidebar({ slug, tabSlug, docs, nav }: Props) {
   const asideRef = useRef<HTMLElement>(null)
   const [width, setWidth] = useState(DEFAULT_WIDTH)
   const [dragging, setDragging] = useState(false)
@@ -50,7 +51,7 @@ export function ResizableDocSidebar({ slug, tabSlug, docs }: Props) {
       className="sticky top-16 hidden h-[calc(100vh-4rem)] shrink-0 overflow-y-auto bg-[#FAFAFA] px-3.5 py-5 pr-5 lg:block"
       style={{ width }}
     >
-      <DocTree slug={slug} tabSlug={tabSlug} docs={docs} />
+      <DocTree slug={slug} tabSlug={tabSlug} docs={docs} nav={nav} />
       <button
         type="button"
         aria-label="调整目录宽度"

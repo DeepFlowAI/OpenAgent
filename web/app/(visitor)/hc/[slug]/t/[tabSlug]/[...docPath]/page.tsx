@@ -11,6 +11,7 @@ import { CopyMarkdownButton } from '../../../_components/copy-markdown-button'
 import {
   cleanReadingMarkdown,
   extractToc,
+  stripLeadingDuplicateTitleHeading,
 } from '../../../_components/markdown-utils'
 
 const PUBLIC_DOCS_HOST =
@@ -102,7 +103,11 @@ export async function generateMetadata({
   ])
 
   const title = `${doc.title} · ${bundle.site_name}`
-  const desc = summarise(doc, cleanReadingMarkdown(doc.markdown_content))
+  const readingMarkdown = stripLeadingDuplicateTitleHeading(
+    cleanReadingMarkdown(doc.markdown_content),
+    doc.title,
+  )
+  const desc = summarise(doc, readingMarkdown)
   const canonical = buildCanonical(slug, tabSlug, path)
   const ogImage = bundle.publisher_logo_url
     ? [bundle.publisher_logo_url]
@@ -142,7 +147,13 @@ export default async function DocPage({
 
   const canonical = buildCanonical(slug, tabSlug, path)
   const lastmod = doc.updated_at ?? null
-  const cleanedSource = cleanReadingMarkdown(doc.markdown_content)
+  const cleanedFull = cleanReadingMarkdown(doc.markdown_content)
+  const cleanedSource = stripLeadingDuplicateTitleHeading(cleanedFull, doc.title)
+  // Clipboard keeps a single `# title` line when we hide the duplicate heading in the UI.
+  const clipboardMarkdown =
+    cleanedSource !== cleanedFull && doc.title.trim().length > 0
+      ? `# ${doc.title.trim()}\n\n${cleanedSource}`
+      : cleanedFull
   const hasToc = extractToc(cleanedSource).length > 0
 
   // JSON-LD for GEO. Inlined into HTML so AI crawlers / search engines
@@ -184,8 +195,8 @@ export default async function DocPage({
                   )}
                 </div>
               </div>
-              {cleanedSource && (
-                <CopyMarkdownButton markdown={cleanedSource} />
+              {clipboardMarkdown.trim().length > 0 && (
+                <CopyMarkdownButton markdown={clipboardMarkdown} />
               )}
             </div>
           </header>

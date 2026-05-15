@@ -42,3 +42,18 @@ class KnowledgeBaseResponse(KnowledgeBaseBase, TimestampSchema):
 
 class KnowledgeBaseListResponse(PaginatedResponse):
     items: list[KnowledgeBaseResponse]
+
+
+class PublicKnowledgeBaseResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str | None = None
+    document_count: int = 0
+    status: str = "active"
+    last_synced_at: datetime | None = None
+
+
+class PublicKnowledgeBaseListResponse(PaginatedResponse):
+    items: list[PublicKnowledgeBaseResponse]

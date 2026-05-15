@@ -63,6 +63,20 @@ def _param(name: str, type_: str, required: bool, description: str) -> ParamDoc:
 
 ENDPOINTS: tuple[EndpointDoc, ...] = (
     EndpointDoc(
+        key="knowledge.list",
+        method="GET",
+        path="/api/v1/knowledge-bases",
+        scope="chat",
+        summary="List knowledge bases for the current tenant.",
+        query_params=[
+            _param("page", "integer", False, "Page number."),
+            _param("per_page", "integer", False, "Items per page, 1-100."),
+        ],
+        response="Paginated list of public knowledge base fields.",
+        errors=["401 missing or invalid API key", "403 scope missing", "422 validation error"],
+        example="python -m app.openapi_cli knowledge list --page 1 --per-page 10",
+    ),
+    EndpointDoc(
         key="knowledge.search",
         method="POST",
         path="/api/v1/knowledge-bases/{kb_id}/search",
@@ -95,6 +109,21 @@ ENDPOINTS: tuple[EndpointDoc, ...] = (
         response="Markdown text.",
         errors=["401 missing or invalid API key", "404 document not found"],
         example="python -m app.openapi_cli knowledge markdown 1 20 --raw",
+    ),
+    EndpointDoc(
+        key="knowledge.documents",
+        method="GET",
+        path="/api/v1/knowledge-bases/{kb_id}/documents",
+        scope="chat",
+        summary="List documents in a knowledge base without embedding Markdown content.",
+        path_params=[_param("kb_id", "integer", True, "Knowledge base ID.")],
+        query_params=[
+            _param("page", "integer", False, "Page number."),
+            _param("per_page", "integer", False, "Items per page, 1-100."),
+        ],
+        response="Paginated list with id, file_path, title, slice_count, updated_at, doc_meta, and markdown_url.",
+        errors=["401 missing or invalid API key", "403 scope missing", "404 knowledge base not found", "422 validation error"],
+        example="python -m app.openapi_cli knowledge documents 1 --page 1 --per-page 20",
     ),
     EndpointDoc(
         key="conversations.create",
@@ -307,7 +336,7 @@ ENDPOINTS: tuple[EndpointDoc, ...] = (
         body_fields=[
             _param("name", "string", True, "Tool name, 1-128 chars."),
             _param("description", "string", False, "Tool description."),
-            _param("tool_type", "string", True, "search, doc_query, notebook, tool_response_fetch, or python_code."),
+            _param("tool_type", "string", True, "search, doc_query, doc_grep, notebook, tool_response_fetch, or python_code."),
             _param("config", "object", False, "Tool config."),
         ],
         response="AgentToolResponse.",
@@ -671,9 +700,18 @@ def run_request(
 
 
 def handle_knowledge(args: argparse.Namespace) -> int:
+    if args.knowledge_action == "list":
+        return run_request(args, "knowledge.list", query={"page": args.page, "per_page": args.per_page})
     if args.knowledge_action == "search":
         body = merge_payload(args, {"query": args.query})
         return run_request(args, "knowledge.search", {"kb_id": args.kb_id}, body=body)
+    if args.knowledge_action == "documents":
+        return run_request(
+            args,
+            "knowledge.documents",
+            {"kb_id": args.kb_id},
+            query={"page": args.page, "per_page": args.per_page},
+        )
     return run_request(args, "knowledge.markdown", {"kb_id": args.kb_id, "doc_id": args.doc_id})
 
 
@@ -849,10 +887,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     knowledge = subparsers.add_parser("knowledge", help="Knowledge base endpoints.")
     knowledge_sub = knowledge.add_subparsers(dest="knowledge_action", required=True)
+    knowledge_list = knowledge_sub.add_parser("list")
+    knowledge_list.add_argument("--page", type=int)
+    knowledge_list.add_argument("--per-page", type=int)
     knowledge_search = knowledge_sub.add_parser("search")
     knowledge_search.add_argument("kb_id", type=int)
     knowledge_search.add_argument("--query", required=True)
     add_json_args(knowledge_search)
+    knowledge_documents = knowledge_sub.add_parser("documents")
+    knowledge_documents.add_argument("kb_id", type=int)
+    knowledge_documents.add_argument("--page", type=int)
+    knowledge_documents.add_argument("--per-page", type=int)
     knowledge_markdown = knowledge_sub.add_parser("markdown")
     knowledge_markdown.add_argument("kb_id", type=int)
     knowledge_markdown.add_argument("doc_id", type=int)
@@ -935,7 +980,7 @@ def build_parser() -> argparse.ArgumentParser:
     tool_create.add_argument("agent_id", type=int)
     tool_create.add_argument("--name", required=True)
     tool_create.add_argument("--description")
-    tool_create.add_argument("--tool-type", required=True, choices=["search", "doc_query", "notebook", "tool_response_fetch", "python_code"])
+    tool_create.add_argument("--tool-type", required=True, choices=["search", "doc_query", "doc_grep", "notebook", "tool_response_fetch", "python_code"])
     add_json_args(tool_create)
     for name in ("get", "delete"):
         tool_item = tool_sub.add_parser(name)

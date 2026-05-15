@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { get, post } from './base'
+import { get, getBlob, post } from './base'
 import type { Conversation, ConversationDetail } from '@/models/conversation'
 import type { PaginatedResponse } from '@/models/common'
 
@@ -56,6 +56,20 @@ export const useConversation = (agentId: number, conversationId: number) =>
         `v1/agents/${agentId}/conversations/${conversationId}`
       ),
     enabled: !!agentId && !!conversationId,
+  })
+
+export const exportConversations = (
+  agentId: number,
+  tenantId: string,
+  params?: Omit<ConversationListParams, 'page' | 'per_page'>
+) =>
+  getBlob(`v1/agents/${agentId}/conversations/export`, {
+    searchParams: {
+      tenant_id: tenantId,
+      ...Object.fromEntries(
+        Object.entries(params ?? {}).filter(([, v]) => v !== undefined && v !== '')
+      ),
+    },
   })
 
 export const endConversation = (agentId: number, conversationId: number) =>

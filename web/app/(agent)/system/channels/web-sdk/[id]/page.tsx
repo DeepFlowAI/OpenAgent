@@ -26,6 +26,10 @@ type AppearanceConfig = {
   pcMemberLogo: string
   mobileLogo: string
   mobileMemberLogo: string
+  headerCustomButtonImage: string
+  headerCustomButtonUrl: string
+  headerMemberCustomButtonImage: string
+  headerMemberCustomButtonUrl: string
   title: string
   pcTitleColor: string
   headerBgColor: string
@@ -37,6 +41,8 @@ type AppearanceConfig = {
   messageAreaBgColor: string
   pcEmptyStateImage: string
   mobileEmptyStateImage: string
+  pcMemberEmptyStateImage: string
+  mobileMemberEmptyStateImage: string
   sendMessageButtonBgColor: string
   sendMessageButtonIconColor: string
   stopMessageButtonBgColor: string
@@ -76,6 +82,10 @@ const DEFAULT_APPEARANCE: AppearanceConfig = {
   pcMemberLogo: '',
   mobileLogo: '',
   mobileMemberLogo: '',
+  headerCustomButtonImage: '',
+  headerCustomButtonUrl: '',
+  headerMemberCustomButtonImage: '',
+  headerMemberCustomButtonUrl: '',
   title: '',
   pcTitleColor: '#1A1A1A',
   headerBgColor: '#1A1A1A',
@@ -87,6 +97,8 @@ const DEFAULT_APPEARANCE: AppearanceConfig = {
   messageAreaBgColor: '#FFFFFF',
   pcEmptyStateImage: '',
   mobileEmptyStateImage: '',
+  pcMemberEmptyStateImage: '',
+  mobileMemberEmptyStateImage: '',
   sendMessageButtonBgColor: '#1A1A1A',
   sendMessageButtonIconColor: '#FFFFFF',
   stopMessageButtonBgColor: '#DC2626',
@@ -182,13 +194,23 @@ export default function EditWebSdkChannelPage() {
       sidebarFooterSubtext: (appearance.sidebarFooterSubtext || '').trim(),
       sidebarFooterLinkLabel: (appearance.sidebarFooterLinkLabel || '').trim(),
       sidebarFooterLinkUrl: (appearance.sidebarFooterLinkUrl || '').trim(),
+      headerCustomButtonImage: (appearance.headerCustomButtonImage || '').trim(),
+      headerCustomButtonUrl: (appearance.headerCustomButtonUrl || '').trim(),
+      headerMemberCustomButtonImage: (appearance.headerMemberCustomButtonImage || '').trim(),
+      headerMemberCustomButtonUrl: (appearance.headerMemberCustomButtonUrl || '').trim(),
       pcEmptyStateImage: (appearance.pcEmptyStateImage || '').trim(),
       mobileEmptyStateImage: (appearance.mobileEmptyStateImage || '').trim(),
+      pcMemberEmptyStateImage: (appearance.pcMemberEmptyStateImage || '').trim(),
+      mobileMemberEmptyStateImage: (appearance.mobileMemberEmptyStateImage || '').trim(),
     }
 
     // Soft-validate the privacy/policy URL — non-blocking warning
-    const url = cleanedAppearance.sidebarFooterLinkUrl
-    if (url && !/^https?:\/\//i.test(url)) {
+    const urlsToCheck = [
+      cleanedAppearance.sidebarFooterLinkUrl,
+      cleanedAppearance.headerCustomButtonUrl,
+      cleanedAppearance.headerMemberCustomButtonUrl,
+    ]
+    if (urlsToCheck.some(u => u && !/^https?:\/\//i.test(u))) {
       toast('链接 URL 建议以 http(s):// 开头', 'error')
     }
 
@@ -413,6 +435,26 @@ export default function EditWebSdkChannelPage() {
                 onChange={(v) => updateAppearance({ headerTitleColor: v })} />
             </FieldRow>
 
+            <SubTitle>头部自定义按钮</SubTitle>
+            <FieldRow label="自定义按钮图片">
+              <UploadArea value={appearance.headerCustomButtonImage}
+                onChange={(v) => updateAppearance({ headerCustomButtonImage: v })}
+                onError={(msg) => toast(msg, 'error')} />
+            </FieldRow>
+            <FieldRow label="自定义按钮链接">
+              <TextInput width={360} value={appearance.headerCustomButtonUrl} placeholder="https://"
+                onChange={(v) => updateAppearance({ headerCustomButtonUrl: v })} />
+            </FieldRow>
+            <FieldRow label="会员自定义按钮图片">
+              <UploadArea value={appearance.headerMemberCustomButtonImage}
+                onChange={(v) => updateAppearance({ headerMemberCustomButtonImage: v })}
+                onError={(msg) => toast(msg, 'error')} />
+            </FieldRow>
+            <FieldRow label="会员自定义按钮链接">
+              <TextInput width={360} value={appearance.headerMemberCustomButtonUrl} placeholder="https://"
+                onChange={(v) => updateAppearance({ headerMemberCustomButtonUrl: v })} />
+            </FieldRow>
+
             <Sep />
 
             {/* 历史消息区 — URL mode only */}
@@ -442,6 +484,16 @@ export default function EditWebSdkChannelPage() {
             <FieldRow label="移动端无消息时图片">
               <UploadArea value={appearance.mobileEmptyStateImage}
                 onChange={(v) => updateAppearance({ mobileEmptyStateImage: v })}
+                onError={(msg) => toast(msg, 'error')} />
+            </FieldRow>
+            <FieldRow label="PC 会员无消息时图片">
+              <UploadArea value={appearance.pcMemberEmptyStateImage}
+                onChange={(v) => updateAppearance({ pcMemberEmptyStateImage: v })}
+                onError={(msg) => toast(msg, 'error')} />
+            </FieldRow>
+            <FieldRow label="移动端会员无消息时图片">
+              <UploadArea value={appearance.mobileMemberEmptyStateImage}
+                onChange={(v) => updateAppearance({ mobileMemberEmptyStateImage: v })}
                 onError={(msg) => toast(msg, 'error')} />
             </FieldRow>
 

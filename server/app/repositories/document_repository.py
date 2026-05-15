@@ -6,6 +6,7 @@ import logging
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.libs.doc_parser.kb_nav_doc_order import sort_documents_by_kb_nav
 from app.models.document import Document
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class DocumentRepository:
         kb_id: int,
         page: int = 1,
         per_page: int = 20,
+        nav_config: list | None = None,
     ) -> tuple[list[Document], int]:
         base_filter = (Document.knowledge_base_id == kb_id,)
 
@@ -43,15 +45,35 @@ class DocumentRepository:
         )
         total = total_result.scalar_one()
 
+        if nav_config is not None and not isinstance(nav_config, list):
+            logger.warning(
+                "Invalid nav_config for kb_id=%s (expected list, got %s); "
+                "falling back to file_path ordering",
+                kb_id,
+                type(nav_config).__name__,
+            )
+            nav_config = None
+
         offset = (page - 1) * per_page
-        result = await db.execute(
+        if nav_config is None:
+            result = await db.execute(
+                select(Document)
+                .where(*base_filter)
+                .order_by(Document.file_path.asc())
+                .offset(offset)
+                .limit(per_page)
+            )
+            return list(result.scalars().all()), total
+
+        all_rows = await db.execute(
             select(Document)
             .where(*base_filter)
-            .order_by(Document.file_path.asc())
-            .offset(offset)
-            .limit(per_page)
+            .order_by(Document.id.asc())
         )
-        return list(result.scalars().all()), total
+        ordered = sort_documents_by_kb_nav(
+            list(all_rows.scalars().all()), nav_config
+        )
+        return ordered[offset : offset + per_page], total
 
     @staticmethod
     async def create(db: AsyncSession, data: dict) -> Document:

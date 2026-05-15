@@ -50,6 +50,9 @@ const client = ky.create({
 export const get = <T>(url: string, options?: Parameters<typeof client.get>[1]) =>
   client.get(url, options).json<T>()
 
+export const getBlob = (url: string, options?: Parameters<typeof client.get>[1]) =>
+  client.get(url, options).blob()
+
 export const post = <T>(url: string, options?: Parameters<typeof client.post>[1]) =>
   client.post(url, options).json<T>()
 

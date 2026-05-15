@@ -1667,7 +1667,7 @@ export default function ToolDetailPage() {
     return null
   })()
 
-  const { data: kbList } = useKnowledgeBases(tenantId, { per_page: 200 })
+  const { data: kbList } = useKnowledgeBases(tenantId, { per_page: 20 })
   const { data: metaFields } = useKBMetaFields(selectedKbId)
   const { data: metaSchema } = useKBMetaSchema(selectedKbId)
 

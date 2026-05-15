@@ -6,6 +6,7 @@ import logging
 from app.services.tool_executors.base import BaseToolExecutor, ToolContext
 from app.services.tool_executors.search_executor import SearchToolExecutor
 from app.services.tool_executors.doc_query_executor import DocQueryToolExecutor
+from app.services.tool_executors.doc_grep_executor import DocGrepToolExecutor
 from app.services.tool_executors.notebook_executor import NotebookToolExecutor
 from app.services.tool_executors.fetch_executor import ToolResponseFetchExecutor
 
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 _EXECUTORS: dict[str, BaseToolExecutor] = {
     "search": SearchToolExecutor(),
     "doc_query": DocQueryToolExecutor(),
+    "doc_grep": DocGrepToolExecutor(),
     "notebook": NotebookToolExecutor(),
     "tool_response_fetch": ToolResponseFetchExecutor(),
 }

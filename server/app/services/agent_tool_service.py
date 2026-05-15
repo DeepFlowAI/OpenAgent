@@ -7,7 +7,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.repositories.agent_tool_repository import AgentToolRepository
-from app.schemas.agent_tool import AgentToolCreate, AgentToolUpdate, AgentToolToggle
+from app.schemas.agent_tool import (
+    DOC_GREP_PARAMETERS_SCHEMA,
+    AgentToolCreate,
+    AgentToolToggle,
+    AgentToolUpdate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +253,7 @@ DOC_QUERY_PARAMETERS_SCHEMA: dict = {
 TOOL_TYPE_PARAMETERS_MAP: dict[str, dict] = {
     "search": SEARCH_PARAMETERS_SCHEMA,
     "doc_query": DOC_QUERY_PARAMETERS_SCHEMA,
+    "doc_grep": DOC_GREP_PARAMETERS_SCHEMA,
 }
 
 
@@ -256,15 +262,16 @@ class AgentToolService:
     @staticmethod
     async def get_tools_by_agent(db: AsyncSession, agent_id: int, tenant_id: str) -> dict:
         items = await AgentToolRepository.get_by_agent_id(db, agent_id)
-        has_system = any(t.is_system for t in items)
-        if not has_system:
-            try:
-                system_tools = await AgentToolRepository.create_system_tools(db, agent_id, tenant_id)
-                items = system_tools + items
-            except Exception:
-                logger.warning("Failed to auto-create system tools for agent %s, retrying read", agent_id)
-                await db.rollback()
+        try:
+            created_system_tools = await AgentToolRepository.ensure_system_tools(
+                db, agent_id, tenant_id
+            )
+            if created_system_tools:
                 items = await AgentToolRepository.get_by_agent_id(db, agent_id)
+        except Exception:
+            logger.warning("Failed to ensure system tools for agent %s, retrying read", agent_id)
+            await db.rollback()
+            items = await AgentToolRepository.get_by_agent_id(db, agent_id)
         return {"items": items}
 
     @staticmethod

@@ -1,0 +1,36 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+*.egg
+venv
+
+# Python packaging
+dist/
+build/
+
+# Node
+node_modules/
+.next/
+out/
+# TypeScript incremental build cache (regenerated locally; never code review fodder)
+*.tsbuildinfo
+
+# Environment (credentials) — never commit real values; only .env.example may be tracked.
+# Real env files live in private/env/ under different names (server.env.dev, etc.)
+# so they don't match these patterns and CAN be tracked there.
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+
+logs/

@@ -5,7 +5,7 @@ These schemas intentionally expose ONLY the white-listed fields needed for SEO
 & visitor rendering. We never echo `tenant_id`, internal IDs of unrelated
 resources, or knowledge-base internals.
 """
-from typing import Any
+from typing import Any, Union
 
 from pydantic import BaseModel, ConfigDict
 
@@ -42,6 +42,7 @@ class PublicDocList(BaseModel):
     page: int
     per_page: int
     pages: int
+    nav: Union[list, None] = None
 
 
 class PublicDocDetail(BaseModel):

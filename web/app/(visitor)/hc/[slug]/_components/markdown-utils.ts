@@ -27,6 +27,55 @@ export function cleanReadingMarkdown(source: string | null | undefined): string 
     .replace(/^\+\+\+\s*$/gm, '')
 }
 
+function normalizeComparableHeading(text: string): string {
+  const stripped = text.replace(/[*_`]/g, '').trim().replace(/\s+/g, ' ')
+  return stripped
+}
+
+/**
+ * Remove the first ATX heading (# … ######) when it duplicates the article
+ * title already shown in the page header — authors often repeat the title as
+ * the opening markdown line.
+ *
+ * Uses the same fenced-code awareness as `extractToc` so `# foo` inside code
+ * fences is not treated as a heading.
+ */
+export function stripLeadingDuplicateTitleHeading(
+  markdown: string,
+  docTitle: string,
+): string {
+  const target = normalizeComparableHeading(docTitle)
+  if (!target || !markdown) return markdown
+
+  const lines = markdown.split('\n')
+  let start = 0
+  while (start < lines.length && lines[start].trim() === '') start++
+
+  let inFence = false
+  for (let j = start; j < lines.length; j++) {
+    const line = lines[j]
+    const trimmedEnd = line.trimEnd()
+    if (trimmedEnd.startsWith('```') || trimmedEnd.startsWith('~~~')) {
+      inFence = !inFence
+      continue
+    }
+    if (inFence) continue
+
+    const m = trimmedEnd.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/)
+    if (!m) break
+
+    const candidate = normalizeComparableHeading(m[2])
+    if (candidate === target) {
+      let end = j + 1
+      while (end < lines.length && lines[end].trim() === '') end++
+      return [...lines.slice(0, start), ...lines.slice(end)].join('\n').trimStart()
+    }
+    break
+  }
+
+  return markdown
+}
+
 const NON_SLUG_CHARS = /[^\p{Letter}\p{Number}\u4e00-\u9fff]+/gu
 
 /**

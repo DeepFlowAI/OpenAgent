@@ -19,6 +19,32 @@ class KnowledgeBaseService:
         )
         pages = (total + per_page - 1) // per_page
         return {
+            "items": [
+                {
+                    "id": item.id,
+                    "name": item.name,
+                    "description": item.description,
+                    "document_count": item.document_count,
+                    "status": item.status,
+                    "last_synced_at": item.last_synced_at,
+                }
+                for item in items
+            ],
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "pages": pages,
+        }
+
+    @staticmethod
+    async def get_public_paginated(
+        db: AsyncSession, tenant_id: str, page: int = 1, per_page: int = 10
+    ) -> dict:
+        items, total = await KnowledgeBaseRepository.get_paginated(
+            db, tenant_id, page, per_page
+        )
+        pages = (total + per_page - 1) // per_page
+        return {
             "items": items,
             "total": total,
             "page": page,

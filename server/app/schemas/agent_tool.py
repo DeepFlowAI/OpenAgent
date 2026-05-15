@@ -7,10 +7,45 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.schemas.base import TimestampSchema
 
 
+DOC_GREP_PARAMETERS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "brief": {
+            "type": "string",
+            "description": "One-line summary for session log display; distinct from doc_id/pattern content",
+        },
+        "doc_id": {
+            "type": "string",
+            "description": "Document ID to search within. Obtain from prior search or doc_query results.",
+        },
+        "pattern": {
+            "type": "string",
+            "description": (
+                "Python re module regular expression. For literal text, use plain string without "
+                "special characters. Common syntax: . * + ? [] () | ^ $ \\d \\w \\s"
+            ),
+        },
+        "ignore_case": {
+            "type": "boolean",
+            "description": "Case-insensitive matching (re.IGNORECASE). Default true.",
+            "default": True,
+        },
+        "context_lines": {
+            "type": "integer",
+            "description": "Number of lines to show before and after each match (like grep -C). Default 5.",
+            "default": 5,
+            "minimum": 0,
+            "maximum": 100,
+        },
+    },
+    "required": ["brief", "doc_id", "pattern"],
+}
+
+
 class AgentToolBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str | None = None
-    tool_type: str = Field(..., pattern=r"^(search|doc_query|notebook|tool_response_fetch|python_code)$")
+    tool_type: str = Field(..., pattern=r"^(search|doc_query|doc_grep|notebook|tool_response_fetch|python_code)$")
 
 
 class AgentToolCreate(AgentToolBase):

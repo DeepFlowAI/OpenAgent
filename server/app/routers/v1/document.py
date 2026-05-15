@@ -9,8 +9,8 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.deps import get_db, require_scope
-from app.core.exceptions import NotFoundError
+from app.db.deps import AuthContext, get_db, require_scope, resolve_auth
+from app.core.exceptions import ForbiddenError, NotFoundError
 from app.libs.doc_parser.parser import clean_markdown_for_reading
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.slice_repository import SliceRepository
@@ -19,9 +19,11 @@ from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from app.schemas.document import (
     DocumentResponse,
     DocumentListResponse,
+    PublicDocumentListResponse,
     SliceListResponse,
     SyncLogListResponse,
 )
+from app.services.document_service import DocumentService
 
 logger = logging.getLogger(__name__)
 
@@ -31,15 +33,29 @@ _ORIGINAL_FETCH_TIMEOUT = httpx.Timeout(120.0, connect=30.0)
 _ORIGINAL_CHUNK = 64 * 1024
 
 
-@router.get("/{kb_id}/documents", response_model=DocumentListResponse)
+@router.get("/{kb_id}/documents", response_model=DocumentListResponse | PublicDocumentListResponse)
 async def list_documents(
     kb_id: int,
-    page: int = 1,
-    per_page: int = 20,
+    auth: AuthContext = Depends(resolve_auth),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
     """List documents for a knowledge base"""
-    items, total = await DocumentRepository.get_paginated(db, kb_id, page, per_page)
+    if auth.scopes is not None:
+        if "chat" not in auth.scopes:
+            raise ForbiddenError("API key lacks required scope: chat")
+        return await DocumentService.get_public_paginated(
+            db, kb_id, auth.tenant_id, page, per_page
+        )
+
+    kb = await KnowledgeBaseRepository.get_by_id(db, kb_id)
+    if not kb or kb.status == "deleted" or kb.tenant_id != auth.tenant_id:
+        raise NotFoundError("Knowledge base not found")
+
+    items, total = await DocumentRepository.get_paginated(
+        db, kb_id, page, per_page, nav_config=kb.nav_config
+    )
     pages = (total + per_page - 1) // per_page
     return {
         "items": items,

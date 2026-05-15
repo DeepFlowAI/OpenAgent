@@ -1,6 +1,7 @@
 import { notFound } from 'next/navigation'
 import { serverGet, ServerApiError } from '@/utils/server-api'
 import type {
+  NavEntry,
   PublicDocListResponse,
   PublicHelpCenterBundle,
 } from '@/models/help-center'
@@ -62,9 +63,11 @@ export default async function TabLayout({ children, params }: Props) {
     notFound()
   }
 
+  const nav: NavEntry[] | null = docList.nav ?? null
+
   return (
     <div className="flex w-full">
-      <ResizableDocSidebar slug={slug} tabSlug={tabSlug} docs={docList.items} />
+      <ResizableDocSidebar slug={slug} tabSlug={tabSlug} docs={docList.items} nav={nav} />
       <div className="min-w-0 flex-1">{children}</div>
     </div>
   )

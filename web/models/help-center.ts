@@ -100,12 +100,17 @@ export type PublicDocSummary = {
   updated_at: string | null
 }
 
+export type NavFileEntry = { file: string }
+export type NavFolderEntry = { folder: string; children?: NavEntry[] }
+export type NavEntry = NavFileEntry | NavFolderEntry | string
+
 export type PublicDocListResponse = {
   items: PublicDocSummary[]
   total: number
   page: number
   per_page: number
   pages: number
+  nav: NavEntry[] | null
 }
 
 export type PublicDocDetail = {

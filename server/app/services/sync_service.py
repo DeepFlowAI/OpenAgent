@@ -27,6 +27,7 @@ from app.libs.doc_parser.schema_loader import (
     extract_schema_definitions,
     get_field_type_map,
 )
+from app.libs.doc_parser.nav_loader import load_nav_config
 from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from app.repositories.document_repository import DocumentRepository
 from app.repositories.slice_repository import SliceRepository
@@ -166,6 +167,8 @@ class SyncService:
             error_count = result["error_count"]
             total_doc_count = result["total_doc_count"]
 
+            nav_config = load_nav_config(repo_path)
+
             kb_row = await KnowledgeBaseRepository.get_by_id(db, kb_id)
             if kb_row:
                 kb_row.last_synced_at = datetime.utcnow()
@@ -175,6 +178,7 @@ class SyncService:
                     **current_schema_fields,
                     **current_schema_defs,
                 }
+                kb_row.nav_config = nav_config
 
             log_row = await SyncLogRepository.get_by_id(db, sync_log_id)
             if not log_row:

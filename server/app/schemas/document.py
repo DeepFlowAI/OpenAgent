@@ -31,6 +31,22 @@ class DocumentListResponse(PaginatedResponse):
     items: list[DocumentResponse]
 
 
+class PublicDocumentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    file_path: str
+    title: str | None = None
+    slice_count: int = 0
+    updated_at: datetime | None = None
+    doc_meta: dict[str, Any] | None = None
+    markdown_url: str
+
+
+class PublicDocumentListResponse(PaginatedResponse):
+    items: list[PublicDocumentResponse]
+
+
 class SliceResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

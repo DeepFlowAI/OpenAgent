@@ -47,6 +47,7 @@ export type StepTimelineItem = {
   round_number: number
   step_order: number
   step_type: StepType
+  client_message_id: string | null
   content: string | null
 
   // LLM summary fields
