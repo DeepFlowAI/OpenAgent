@@ -9,14 +9,17 @@ import { useToast } from '@/app/components/base/toast'
 import { getErrorMessage } from '@/service/base'
 import { useKnowledgeBase } from '@/service/use-knowledge-base'
 import {
+  documentKeys,
   useDocuments,
   useSyncLogs,
   useTriggerSync,
+  useCancelSync,
 } from '@/service/use-document'
 import type { SyncMode } from '@/service/use-document'
+import type { SyncLog, SyncProgress } from '@/models/document'
 import { knowledgeBaseKeys } from '@/service/use-knowledge-base'
 import { useQueryClient } from '@tanstack/react-query'
-import { IconArrowLeft, IconRefresh, IconChevronDown } from '@tabler/icons-react'
+import { IconArrowLeft, IconRefresh, IconChevronDown, IconPlayerStop } from '@tabler/icons-react'
 import { PermissionRulesTab } from '@/app/components/features/permission-rules-tab'
 
 const tabs = [
@@ -44,6 +47,17 @@ export default function KnowledgeBaseDetailPage({
   const { data: kb, isLoading: kbLoading } = useKnowledgeBase(kbId)
   const { data: logsData } = useSyncLogs(kbId)
   const syncMutation = useTriggerSync()
+  const cancelSyncMutation = useCancelSync()
+  const runningLog = (logsData?.items ?? []).find((log) => log.status === 'running')
+  const hasRunningSync = !!runningLog
+  const syncDisabled = syncMutation.isPending || hasRunningSync
+
+  useEffect(() => {
+    if (!hasRunningSync) {
+      void qc.invalidateQueries({ queryKey: knowledgeBaseKeys.detail(kbId) })
+      void qc.invalidateQueries({ queryKey: documentKeys.lists() })
+    }
+  }, [hasRunningSync, kbId, qc])
 
   useEffect(() => {
     if (!syncDropdownOpen) return
@@ -61,7 +75,12 @@ export default function KnowledgeBaseDetailPage({
     try {
       const res = await syncMutation.mutateAsync({ kbId, syncMode: mode })
       const status = typeof res?.status === 'string' ? res.status : ''
-      qc.invalidateQueries({ queryKey: knowledgeBaseKeys.detail(kbId) })
+      await qc.invalidateQueries({ queryKey: documentKeys.syncLogs(kbId) })
+      if (status === 'running') {
+        toast(mode === 'full' ? '全量同步已开始，请查看解析日志进度' : '同步已开始，请查看解析日志进度', 'success')
+        return
+      }
+      await qc.invalidateQueries({ queryKey: knowledgeBaseKeys.detail(kbId) })
       if (status === 'failed') {
         const err =
           typeof res?.error === 'string' && res.error
@@ -80,6 +99,16 @@ export default function KnowledgeBaseDetailPage({
       toast(msg, 'error')
     }
   }, [kbId, syncMutation, qc, toast])
+
+  const handleStopSync = useCallback(async (syncLogId?: number) => {
+    try {
+      await cancelSyncMutation.mutateAsync({ kbId, syncLogId })
+      toast('同步已停止', 'success')
+    } catch (err) {
+      const msg = await getErrorMessage(err)
+      toast(msg, 'error')
+    }
+  }, [kbId, cancelSyncMutation, toast])
 
   if (kbLoading) {
     return (
@@ -125,12 +154,12 @@ export default function KnowledgeBaseDetailPage({
                   variant="default"
                   className="rounded-r-none"
                   onClick={() => handleSync('auto')}
-                  disabled={syncMutation.isPending}
-                  aria-busy={syncMutation.isPending}
+                  disabled={syncDisabled}
+                  aria-busy={syncMutation.isPending || hasRunningSync}
                 >
                   <IconRefresh
                     size={16}
-                    className={cn('mr-1.5', syncMutation.isPending && 'animate-spin')}
+                    className={cn('mr-1.5', (syncMutation.isPending || hasRunningSync) && 'animate-spin')}
                     aria-hidden
                   />
                   同步并解析
@@ -141,7 +170,7 @@ export default function KnowledgeBaseDetailPage({
                     'inline-flex items-center rounded-r-lg border-l border-white/20 bg-[#1a1a1a] px-2 text-white transition-colors hover:bg-[#333]',
                     'disabled:bg-[#D4D4D4] disabled:text-[#A3A3A3]',
                   )}
-                  disabled={syncMutation.isPending}
+                  disabled={syncDisabled}
                   onClick={() => setSyncDropdownOpen((v) => !v)}
                   aria-label="更多同步选项"
                 >
@@ -153,6 +182,7 @@ export default function KnowledgeBaseDetailPage({
                   <button
                     type="button"
                     className="w-full px-4 py-2.5 text-left text-sm text-foreground transition-colors hover:bg-[#F5F5F5]"
+                    disabled={syncDisabled}
                     onClick={() => handleSync('full')}
                   >
                     全量同步
@@ -160,6 +190,16 @@ export default function KnowledgeBaseDetailPage({
                 </div>
               )}
             </div>
+            {hasRunningSync && (
+              <Button
+                variant="outline"
+                disabled={cancelSyncMutation.isPending}
+                onClick={() => handleStopSync(runningLog?.id)}
+              >
+                <IconPlayerStop size={16} className="mr-1.5" aria-hidden />
+                停止同步
+              </Button>
+            )}
           </div>
         </div>
         <div className="flex gap-6">
@@ -185,7 +225,13 @@ export default function KnowledgeBaseDetailPage({
           <DocumentsTab kbId={kbId} formatDate={formatDate} />
         )}
         {activeTab === 'sync' && (
-          <SyncTab kb={kb} logs={logsData?.items ?? []} formatDate={formatDate} />
+          <SyncTab
+            kb={kb}
+            logs={logsData?.items ?? []}
+            formatDate={formatDate}
+            onStopSync={handleStopSync}
+            stopPending={cancelSyncMutation.isPending}
+          />
         )}
         {activeTab === 'config' && <ConfigTab kb={kb} />}
         {activeTab === 'permissions' && (
@@ -308,10 +354,83 @@ function DocumentsTab({
   )
 }
 
+function parseSyncLogDetails(log: SyncLog) {
+  if (!log.details) {
+    return { sync_mode: undefined as string | undefined, progress: undefined as SyncProgress | undefined, files: [] as Array<{ file: string; status: string; error?: string; slice_count?: number }> }
+  }
+  if (Array.isArray(log.details)) {
+    return { sync_mode: undefined, progress: undefined, files: log.details }
+  }
+  return {
+    sync_mode: log.details.sync_mode,
+    progress: log.details.progress,
+    files: log.details.files ?? [],
+  }
+}
+
+function syncOverallPercent(
+  log: { total_files: number | null; success_count: number | null; error_count: number | null },
+  progress: SyncProgress,
+): number {
+  const fileTotal = progress.file_total ?? log.total_files ?? 0
+  if (fileTotal <= 0) return 0
+  const merged: SyncProgress = { ...progress, file_total: fileTotal }
+  const fromProgress = syncProgressPercent(merged)
+  if (fromProgress > 0) return fromProgress
+  const completed = (log.success_count ?? 0) + (log.error_count ?? 0)
+  return Math.min(100, Math.round((completed / fileTotal) * 100))
+}
+
+function syncCurrentFilePercent(progress: SyncProgress): number | null {
+  if (
+    progress.phase === 'embedding' &&
+    progress.embedding_batch != null &&
+    progress.embedding_batch_total
+  ) {
+    return Math.min(
+      100,
+      Math.round(
+        (progress.embedding_batch / progress.embedding_batch_total) * 100,
+      ),
+    )
+  }
+  return null
+}
+
+function syncProgressPercent(progress: SyncProgress): number {
+  const { file_index: fileIndex, file_total: fileTotal } = progress
+  if (fileIndex && fileTotal) {
+    if (
+      progress.phase === 'embedding' &&
+      progress.embedding_batch != null &&
+      progress.embedding_batch_total
+    ) {
+      const completed = Math.max(0, fileIndex - 1)
+      return Math.min(
+        100,
+        Math.round(
+          ((completed + progress.embedding_batch / progress.embedding_batch_total) /
+            fileTotal) *
+            100,
+        ),
+      )
+    }
+    if (progress.phase === 'import' || progress.phase === 'delete') {
+      return Math.min(100, Math.round((fileIndex / fileTotal) * 100))
+    }
+  }
+  if (progress.percent != null) {
+    return progress.percent
+  }
+  return 0
+}
+
 function SyncTab({
   kb,
   logs,
   formatDate,
+  onStopSync,
+  stopPending,
 }: {
   kb: { last_synced_at: string | null; document_count: number }
   logs: Array<{
@@ -324,6 +443,8 @@ function SyncTab({
     } | Array<{ file: string; status: string; error?: string; slice_count?: number }> | null
   }>
   formatDate: (d: string | null) => string
+  onStopSync: (syncLogId?: number) => void
+  stopPending: boolean
 }) {
   const MAX_PARSE_LOG_ROWS = 10
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(new Set())
@@ -355,12 +476,14 @@ function SyncTab({
     partial_success:
       'bg-amber-50 text-amber-800 ring-1 ring-amber-200',
     failed: 'bg-red-50 text-red-600 ring-1 ring-red-200',
+    cancelled: 'bg-gray-50 text-gray-600 ring-1 ring-gray-200',
   }
   const logStatusText: Record<string, string> = {
     running: '运行中',
     success: '成功',
     partial_success: '部分成功',
     failed: '失败',
+    cancelled: '已停止',
   }
 
   return (
@@ -390,28 +513,39 @@ function SyncTab({
           </div>
         ) : (
           <div className="space-y-4">
-            {logs.map((log) => (
+            {logs.map((log) => {
+              const parsed = parseSyncLogDetails(log as SyncLog)
+              const progress = parsed.progress
+              const detailsList = parsed.files.filter((d) => d.status !== 'unchanged')
+              const overallPct =
+                log.status === 'running' && progress
+                  ? syncOverallPercent(log, progress)
+                  : null
+              const currentFilePct =
+                log.status === 'running' && progress
+                  ? syncCurrentFilePercent(progress)
+                  : null
+              const fileTotal = progress?.file_total ?? log.total_files ?? null
+              const completedFiles =
+                (log.success_count ?? 0) + (log.error_count ?? 0)
+
+              return (
               <div key={log.id} className="overflow-hidden rounded-xl border border-border shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
                 {/* Log header */}
-                <div className="flex items-center gap-3 border-b border-border bg-[#FAFBFC] px-5 py-3">
+                <div className="flex flex-wrap items-center gap-3 border-b border-border bg-[#FAFBFC] px-5 py-3">
                   <span className={cn('inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium', logStatusColor[log.status] || 'bg-gray-50 text-gray-600 ring-1 ring-gray-200')}>
                     {logStatusText[log.status] || log.status}
                   </span>
-                  {(() => {
-                    const d = log.details && !Array.isArray(log.details) ? log.details : null
-                    const mode = d?.sync_mode
-                    if (!mode) return null
-                    return (
+                  {parsed.sync_mode && (
                       <span className={cn(
                         'inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium',
-                        mode === 'incremental'
+                        parsed.sync_mode === 'incremental'
                           ? 'bg-sky-50 text-sky-600 ring-1 ring-sky-200'
                           : 'bg-violet-50 text-violet-600 ring-1 ring-violet-200',
                       )}>
-                        {mode === 'incremental' ? '增量同步' : '全量同步'}
+                        {parsed.sync_mode === 'incremental' ? '增量同步' : '全量同步'}
                       </span>
-                    )
-                  })()}
+                  )}
                   <span className="text-xs text-muted-foreground">{formatDate(log.started_at)}</span>
                   {log.total_files != null && (
                     <span className="text-xs text-muted-foreground">
@@ -420,13 +554,82 @@ function SyncTab({
                       {(log.error_count ?? 0) > 0 && <> · <span className="text-red-500">{log.error_count} 失败</span></>}
                     </span>
                   )}
+                  {log.status === 'running' && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="ml-auto h-7 px-2.5 text-xs"
+                      disabled={stopPending}
+                      onClick={() => onStopSync(log.id)}
+                    >
+                      <IconPlayerStop size={14} className="mr-1" aria-hidden />
+                      停止
+                    </Button>
+                  )}
                 </div>
+                {log.status === 'running' && progress && (
+                  <div className="space-y-4 border-b border-border bg-white px-5 py-4">
+                    {/* Overall progress */}
+                    <div>
+                      <div className="mb-2 flex items-center justify-between gap-3 text-xs">
+                        <span className="font-medium text-foreground">总进度</span>
+                        <span className="shrink-0 text-muted-foreground">
+                          {overallPct}%
+                          {fileTotal != null && (
+                            <> · {completedFiles}/{fileTotal} 文件</>
+                          )}
+                        </span>
+                      </div>
+                      <div className="h-2 overflow-hidden rounded-full bg-[#F4F4F5]">
+                        <div
+                          className="h-full rounded-full bg-blue-500 transition-all duration-500"
+                          style={{ width: `${overallPct ?? 0}%` }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Current file progress */}
+                    <div>
+                      <div className="mb-2 flex items-center justify-between gap-3 text-xs">
+                        <span className="font-medium text-foreground">
+                          {progress.message ?? '当前文件处理中…'}
+                        </span>
+                        {currentFilePct != null && (
+                          <span className="shrink-0 text-muted-foreground">
+                            {currentFilePct}%
+                          </span>
+                        )}
+                      </div>
+                      {currentFilePct != null ? (
+                        <div className="h-1.5 overflow-hidden rounded-full bg-[#F4F4F5]">
+                          <div
+                            className="h-full rounded-full bg-blue-300 transition-all duration-500"
+                            style={{ width: `${currentFilePct}%` }}
+                          />
+                        </div>
+                      ) : (
+                        <div className="h-1.5 overflow-hidden rounded-full bg-[#F4F4F5]">
+                          <div className="h-full w-1/3 animate-pulse rounded-full bg-blue-300" />
+                        </div>
+                      )}
+                      {progress.current_file && (
+                        <p className="mt-2 truncate text-xs text-muted-foreground" title={progress.current_file}>
+                          当前文件：{progress.current_file}
+                        </p>
+                      )}
+                      {progress.phase === 'embedding' && progress.slice_count != null && (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          本文件 {progress.slice_count} 个切片
+                          {progress.embedding_batch != null && progress.embedding_batch_total != null && (
+                            <> · 向量化 {progress.embedding_batch}/{progress.embedding_batch_total}</>
+                          )}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
                 {/* Log detail rows */}
-                {log.details && (() => {
-                  const rawList: Array<{ file: string; status: string; error?: string; slice_count?: number }> =
-                    Array.isArray(log.details) ? log.details : (log.details.files ?? [])
-                  const detailsList = rawList.filter((d) => d.status !== 'unchanged')
-                  if (detailsList.length === 0) return null
+                {detailsList.length > 0 && (() => {
                   const listExpanded = expandedDetailLogs.has(log.id)
                   const rowsToShow =
                     detailsList.length <= MAX_PARSE_LOG_ROWS || listExpanded
@@ -521,7 +724,7 @@ function SyncTab({
                   )
                 })()}
               </div>
-            ))}
+            )})}
           </div>
         )}
       </div>

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.slice import Slice
 from app.repositories.kb_permission_rule_repository import KbPermissionRuleRepository
+from app.schemas.conversation import CONVERSATION_SOURCE_VALUES, normalize_channel_source
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,14 @@ logger = logging.getLogger(__name__)
 # unless overridden at slice level (future: slice_meta.access_keywords).
 _AK_COLUMN = Slice.doc_meta
 _AK_KEY = "access_keywords"
+_SYSTEM_FIELD_MAP = {
+    "system.source": "source",
+    "system.channel_id": "channel_id",
+    "system.channel_source": "channel_source",
+}
+_LEGACY_SYSTEM_FIELD_MAP = {
+    "channel": "channel_id",
+}
 
 
 class PermissionEngine:
@@ -49,14 +58,9 @@ class PermissionEngine:
             logger.debug("Permission skip — no enabled rules for kb_id=%s", kb_id)
             return []
 
-        # Build the evaluation dict: start with nested metadata, then overlay
-        # top-level subject fields (email, display_name, external_user_id, etc.)
-        # so permission rules can reference both conversation fields and custom metadata.
-        metadata = dict(subject_context.get("metadata") or {})
-        for key in ("email", "display_name", "external_user_id", "phone"):
-            val = subject_context.get(key)
-            if val is not None and key not in metadata:
-                metadata[key] = val
+        # Build the evaluation dict: metadata stays backward compatible, while
+        # system fields live under an explicit namespace to avoid key collisions.
+        metadata = _build_eval_fields(subject_context)
         logger.info(
             "Permission eval — kb_id=%s, subject_keys=%s, eval_fields=%s, rules=%d",
             kb_id,
@@ -105,6 +109,59 @@ class PermissionEngine:
 # ---------------------------------------------------------------------------
 # User condition evaluation (§6.2.1)
 # ---------------------------------------------------------------------------
+
+def _build_eval_fields(subject_context: dict) -> dict:
+    """Flatten subject context into fields used by permission rules."""
+    eval_fields = dict(subject_context.get("metadata") or {})
+
+    for key in ("email", "display_name", "external_user_id", "phone"):
+        val = subject_context.get(key)
+        if val is not None and key not in eval_fields:
+            eval_fields[key] = val
+
+    system_values = {
+        "source": _normalize_permission_source(subject_context.get("source")),
+        "channel_id": _normalize_permission_channel_id(
+            subject_context.get("channel_id")
+        ),
+        "channel_source": normalize_channel_source(
+            subject_context.get("channel_source")
+        ),
+    }
+
+    for field, source_key in _SYSTEM_FIELD_MAP.items():
+        eval_fields[field] = system_values[source_key]
+
+    # Bare system names are accepted for API callers only when metadata does not
+    # already contain the same key. New UI writes the explicit system.* fields.
+    for key, value in system_values.items():
+        if value is not None and key not in eval_fields:
+            eval_fields[key] = value
+
+    for legacy_field, source_key in _LEGACY_SYSTEM_FIELD_MAP.items():
+        if legacy_field not in eval_fields and system_values[source_key] is not None:
+            eval_fields[legacy_field] = system_values[source_key]
+
+    return eval_fields
+
+
+def _normalize_permission_source(value: Any) -> str | None:
+    """Normalize source for permission evaluation without mapping legacy values."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if normalized in CONVERSATION_SOURCE_VALUES:
+        return normalized
+    return None
+
+
+def _normalize_permission_channel_id(value: Any) -> Any:
+    """Return a comparable channel id value or None for empty inputs."""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
 
 def _evaluate_user_conditions(conditions: list[dict], metadata: dict) -> bool:
     """Evaluate a list of user conditions against conversation metadata.

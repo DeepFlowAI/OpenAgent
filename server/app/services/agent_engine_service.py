@@ -7,8 +7,10 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Awaitable, AsyncIterator, Callable
+from typing import Awaitable, AsyncIterator, Callable, Mapping
+from xml.etree import ElementTree
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,9 +31,28 @@ from app.repositories.agent_repository import AgentRepository
 from app.repositories.agent_tool_repository import AgentToolRepository
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.conversation_step_repository import ConversationStepRepository
+from app.repositories.service_hours_repository import ServiceHoursRepository
 from app.schemas.agent import EngineConfig
-from app.schemas.conversation import ConversationCreate
+from app.schemas.agent_tool import (
+    HUMAN_HANDOFF_EVENT_KIND,
+    HUMAN_HANDOFF_EVENT_STEP_TYPE,
+    HUMAN_HANDOFF_SCHEMA_VERSION,
+    HUMAN_HANDOFF_TOOL_TYPE,
+    NOTEBOOK_PARAMETERS_SCHEMA,
+    build_human_handoff_parameters_schema,
+    normalize_human_handoff_arguments,
+    normalize_human_handoff_config,
+)
+from app.schemas.conversation import (
+    ConversationCreate,
+    normalize_channel_source,
+    normalize_conversation_source,
+)
 from app.schemas.conversation_step import StepCreate
+from app.services.agent_message_preprocessor import (
+    AgentMessagePreprocessor,
+)
+from app.services.service_hours_service import ServiceHoursEvaluator
 from app.services.round_event_buffer import (
     RoundKey,
     format_event_id,
@@ -43,6 +64,8 @@ from app.libs.template import render_template
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 20
+TOOL_CALL_LIMIT_ERROR_CODE = "tool_call_limit_exceeded"
+TOOL_CALL_LIMIT_FINISH_REASON = "tool_call_limit"
 
 # Type alias for the optional "is the SSE client still connected?" probe the
 # router may inject. Returning True ⇒ disconnected ⇒ we MUST NOT spend more
@@ -418,16 +441,27 @@ class AgentEngineService:
             create_data = {
                 "tenant_id": agent.tenant_id,
                 "agent_id": agent_id,
-                "source": "chat",
+                "source": "api",
             }
             if customer_context:
                 # Merge customer context into conversation create data
                 for key in (
                     "external_user_id", "display_name", "email",
-                    "phone", "avatar_url", "source", "title", "metadata",
+                    "phone", "avatar_url", "source", "channel_id", "channel_source",
+                    "is_test", "title", "metadata",
                 ):
                     if key in customer_context and customer_context[key] is not None:
                         create_data[key] = customer_context[key]
+                create_data["source"] = normalize_conversation_source(
+                    create_data.get("source")
+                )
+                channel_source = normalize_channel_source(
+                    create_data.get("channel_source")
+                )
+                if channel_source:
+                    create_data["channel_source"] = channel_source
+                else:
+                    create_data.pop("channel_source", None)
             conv = await ConversationRepository.create(db, create_data)
             conversation_id = conv.id
             set_conversation_id(conversation_id)
@@ -613,6 +647,9 @@ class AgentEngineService:
             resume_current_round_messages: list[dict] | None = None
             resume_pending_tool_calls: list[dict] | None = None
             resume_pending_llm_step = None
+            resume_processed_user_message: str | None = None
+            user_step = None
+            last_llm_step_id: int | None = None
 
             if resume:
                 saved_steps = await ConversationStepRepository.get_steps_by_round(
@@ -664,7 +701,15 @@ class AgentEngineService:
 
                     for step in saved_steps:
                         if step.step_type == "user_message":
+                            user_step = step
                             user_message = step.content or user_message
+                            snapshot_content = (
+                                AgentMessagePreprocessor.get_snapshot_processed_content(
+                                    step.metadata_ or {}
+                                )
+                            )
+                            if snapshot_content is not None:
+                                resume_processed_user_message = snapshot_content
                             resume_round_msgs[0] = {"role": "user", "content": user_message}
 
                         elif step.step_type == "llm_call":
@@ -689,6 +734,7 @@ class AgentEngineService:
                             if step.content:
                                 yield emitter.emit("content_delta", {"content": step.content})
                             yield emitter.emit("llm_step_created", {"step_id": step.id})
+                            last_llm_step_id = step.id
 
                             if step.response_tool_calls:
                                 resume_round_msgs.append({
@@ -718,10 +764,21 @@ class AgentEngineService:
                         elif step.step_type == "assistant_message":
                             # Round already complete — just send done and return
                             logger.info("Resume — round already complete, step_id=%s", step.id)
-                            yield emitter.emit("done", {
+                            done_payload = {
                                 "assistant_step_id": step.id,
                                 "final_content": step.content or "",
-                            })
+                            }
+                            step_metadata = step.metadata_ or {}
+                            if (
+                                step_metadata.get("notice_type") == "tool_call_limit"
+                                or step_metadata.get("code") == TOOL_CALL_LIMIT_ERROR_CODE
+                            ):
+                                done_payload.update({
+                                    "finish_reason": TOOL_CALL_LIMIT_FINISH_REASON,
+                                    "code": TOOL_CALL_LIMIT_ERROR_CODE,
+                                    "reply": step.content or "",
+                                })
+                            yield emitter.emit("done", done_payload)
                             return
 
                     # Check for pending (un-executed) tool calls from the last LLM step
@@ -777,16 +834,55 @@ class AgentEngineService:
                 )
 
             # Load tools
+            conversation_source = getattr(conv, "source", "api")
             tools_defs = await _load_tools(db, agent_id, config.selected_tool_ids)
+            tools_defs = await _filter_runtime_tools(
+                db,
+                tools_defs,
+                conversation_source=conversation_source,
+                tenant_id=agent.tenant_id,
+            )
             openai_tools = _to_openai_tools(tools_defs) if tools_defs else None
             logger.info("Tools loaded — count=%d, names=%s", len(tools_defs), [t["name"] for t in tools_defs])
 
             # Build messages
             history = await _build_history(db, conversation_id, config, round_number)
-            if resume_current_round_messages is not None:
-                current_round_messages = resume_current_round_messages
+            if resume_processed_user_message is not None:
+                processed_user_message = resume_processed_user_message
             else:
-                current_round_messages = [{"role": "user", "content": user_message}]
+                preprocessing_result = (
+                    await AgentMessagePreprocessor.prepare_current_user_message(
+                        db, agent.tenant_id, agent_id, user_message
+                    )
+                )
+                processed_user_message = preprocessing_result.text
+                if user_step is not None:
+                    await ConversationStepRepository.update(
+                        db,
+                        user_step,
+                        {
+                            "metadata": {
+                                **(user_step.metadata_ or {}),
+                                **preprocessing_result.metadata,
+                            }
+                        },
+                    )
+            if processed_user_message != user_message:
+                logger.info(
+                    "Message preprocessing applied — agent_id=%s original_len=%d processed_len=%d",
+                    agent_id, len(user_message), len(processed_user_message),
+                )
+            if resume_current_round_messages is not None:
+                current_round_messages = list(resume_current_round_messages)
+                if current_round_messages and current_round_messages[0].get("role") == "user":
+                    current_round_messages[0] = {
+                        **current_round_messages[0],
+                        "content": processed_user_message,
+                    }
+            else:
+                current_round_messages = [
+                    {"role": "user", "content": processed_user_message}
+                ]
             logger.debug("History built — %d messages from previous rounds", len(history))
 
             llm_client = create_llm_client()
@@ -799,18 +895,10 @@ class AgentEngineService:
                 conversation_id=conversation_id,
                 tenant_id=agent.tenant_id,
                 agent_id=agent_id,
+                conversation_source=conversation_source,
             )
 
-            # Built-in datetime variables (Asia/Shanghai)
-            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
-            _WEEKDAY_ZH = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
-            _now = _dt.now(_tz(_td(hours=8)))
-            template_vars: dict[str, str] = {
-                "current_date": _now.strftime("%Y-%m-%d"),
-                "current_weekday": _WEEKDAY_ZH[_now.weekday()],
-                "current_time": _now.strftime("%H:%M"),
-                "current_datetime": _now.strftime("%Y-%m-%d %H:%M"),
-            }
+            template_vars: dict[str, str] = {}
 
             # Pre-recall: first round only, when enabled
             if round_number == 1 and config.pre_recall.enabled and config.pre_recall.tool_id:
@@ -819,10 +907,11 @@ class AgentEngineService:
                 logger.info(
                     "[Pre-recall] START agent_id=%s conv=%s tool_id=%s query=%r",
                     agent_id, conversation_id, config.pre_recall.tool_id,
-                    user_message[:120] if user_message else "",
+                    processed_user_message[:120] if processed_user_message else "",
                 )
                 pre_recall_result = await _execute_pre_recall(
-                    db, agent_id, config.pre_recall.tool_id, user_message, tool_ctx,
+                    db, agent_id, config.pre_recall.tool_id,
+                    processed_user_message, tool_ctx,
                 )
                 _pr_elapsed = round((_time.monotonic() - _pr_start) * 1000)
                 if pre_recall_result:
@@ -837,14 +926,6 @@ class AgentEngineService:
                         "[Pre-recall] EMPTY agent_id=%s elapsed=%dms — no results returned",
                         agent_id, _pr_elapsed,
                     )
-
-            rendered_prompt = render_template(config.system_prompt, template_vars) if config.system_prompt else ""
-            logger.info(
-                "System prompt rendered — template_vars=%s, raw_len=%d, rendered_len=%d",
-                list(template_vars.keys()) or "none",
-                len(config.system_prompt) if config.system_prompt else 0,
-                len(rendered_prompt),
-            )
 
             # Tool loop
             _engine_start_ms = _now_ms()
@@ -880,7 +961,7 @@ class AgentEngineService:
                     tool_duration = _now_ms() - tool_start
                     _total_tool_ms += tool_duration
 
-                    tool_step = await _create_step(db, conversation_id, agent.tenant_id, {
+                    tool_step_data = {
                         "round_number": round_number,
                         "step_type": "tool_call",
                         "tool_name": tool_name,
@@ -891,10 +972,26 @@ class AgentEngineService:
                         "brief": brief,
                         "duration_ms": tool_duration,
                         "parent_step_id": resume_pending_llm_step.id,
-                    })
+                    }
+                    tool_step_data.update(
+                        _tool_call_status_fields(tool_def, tool_result)
+                    )
+                    tool_step = await _create_step(
+                        db, conversation_id, agent.tenant_id, tool_step_data
+                    )
 
                     await ConversationRepository.increment_counters(
                         db, conversation_id, tool_call_count=1,
+                    )
+                    await _create_human_handoff_event_step(
+                        db,
+                        conv,
+                        agent_id,
+                        round_number,
+                        tool_step,
+                        tool_args,
+                        tool_def,
+                        tool_result,
                     )
 
                     yield emitter.emit("tool_call", {
@@ -915,6 +1012,23 @@ class AgentEngineService:
                     })
 
             for tool_round_idx in range(resume_tool_round_start, MAX_TOOL_ROUNDS):
+                call_template_vars = {
+                    **template_vars,
+                    **_datetime_template_vars(),
+                    **_runtime_template_vars(
+                        config=config,
+                        round_number=round_number,
+                        history=history,
+                        llm_call_index=tool_round_idx + 1,
+                        current_round_messages=current_round_messages,
+                    ),
+                }
+                rendered_prompt = await _render_system_prompt(
+                    config.system_prompt,
+                    call_template_vars,
+                    tools_defs,
+                    tool_ctx,
+                )
                 messages = _assemble_messages(rendered_prompt, history, current_round_messages)
 
                 start_ms = _now_ms()
@@ -1250,6 +1364,7 @@ class AgentEngineService:
                     "metadata": step_metadata,
                 })
                 logger.debug("LLM step saved — step_id=%s", llm_step.id)
+                last_llm_step_id = llm_step.id
 
                 # Update conversation token counters
                 await ConversationRepository.increment_counters(
@@ -1315,7 +1430,7 @@ class AgentEngineService:
                         )
 
                         # Save tool_call step
-                        tool_step = await _create_step(db, conversation_id, agent.tenant_id, {
+                        tool_step_data = {
                             "round_number": round_number,
                             "step_type": "tool_call",
                             "tool_name": tool_name,
@@ -1326,10 +1441,26 @@ class AgentEngineService:
                             "brief": brief,
                             "duration_ms": tool_duration,
                             "parent_step_id": llm_step.id,
-                        })
+                        }
+                        tool_step_data.update(
+                            _tool_call_status_fields(tool_def, tool_result)
+                        )
+                        tool_step = await _create_step(
+                            db, conversation_id, agent.tenant_id, tool_step_data
+                        )
 
                         await ConversationRepository.increment_counters(
                             db, conversation_id, tool_call_count=1,
+                        )
+                        await _create_human_handoff_event_step(
+                            db,
+                            conv,
+                            agent_id,
+                            round_number,
+                            tool_step,
+                            tool_args,
+                            tool_def,
+                            tool_result,
                         )
 
                         yield emitter.emit("tool_call", {
@@ -1402,10 +1533,41 @@ class AgentEngineService:
 
             # Exceeded max tool rounds
             logger.warning("── Engine abort ── exceeded max tool rounds (%d)", MAX_TOOL_ROUNDS)
-            yield emitter.emit("error", {"message": "Exceeded maximum tool call rounds"})
+            reply = _tool_call_limit_reply_content(config)
+            assistant_step = await _create_step(db, conversation_id, agent.tenant_id, {
+                "round_number": round_number,
+                "step_type": "assistant_message",
+                "content": reply,
+                "parent_step_id": last_llm_step_id,
+                "status": "success",
+                "metadata": {
+                    "notice_type": "tool_call_limit",
+                    "code": TOOL_CALL_LIMIT_ERROR_CODE,
+                    "generated_by": "system",
+                },
+            })
+            await ConversationRepository.increment_counters(
+                db, conversation_id, round_count=1,
+            )
+            yield emitter.emit("done", {
+                "assistant_step_id": assistant_step.id,
+                "final_content": reply,
+                "finish_reason": TOOL_CALL_LIMIT_FINISH_REASON,
+                "code": TOOL_CALL_LIMIT_ERROR_CODE,
+                "reply": reply,
+            })
+            return
 
 
 # ── Helper functions ──
+
+def _tool_call_limit_reply_content(config: EngineConfig) -> str:
+    """Return the user-facing tool-call limit reply with a default fallback."""
+    default = EngineConfig().conversation_settings.tool_call_limit_reply.content
+    content = config.conversation_settings.tool_call_limit_reply.content
+    content = content.strip() if content else ""
+    return content or default
+
 
 def _watchdog_for(config: EngineConfig) -> dict:
     """Return per-round watchdog config the SSE client should adopt.
@@ -1606,13 +1768,81 @@ async def _load_tools(db: AsyncSession, agent_id: int, selected_ids: list[int]) 
             "id": t.id,
             "name": t.name,
             "description": t.description or "",
-            "parameters_schema": t.parameters_schema,
+            "parameters_schema": _runtime_parameters_schema(t),
             "tool_type": t.tool_type,
             "config": t.config or {},
         }
         for t in tools
         if t.id in selected_ids and t.is_enabled
     ]
+
+
+async def _filter_runtime_tools(
+    db: AsyncSession,
+    tools: list[dict],
+    *,
+    conversation_source: str,
+    tenant_id: str,
+    moment: datetime | None = None,
+) -> list[dict]:
+    """Apply per-conversation runtime exposure rules."""
+    filtered: list[dict] = []
+    for tool in tools:
+        if tool.get("tool_type") != HUMAN_HANDOFF_TOOL_TYPE:
+            filtered.append(tool)
+            continue
+        if conversation_source != "api":
+            continue
+        if await _human_handoff_is_in_service(
+            db,
+            tool.get("config") or {},
+            tenant_id=tenant_id,
+            moment=moment,
+        ):
+            filtered.append(tool)
+    return filtered
+
+
+async def _human_handoff_is_in_service(
+    db: AsyncSession,
+    config: dict,
+    *,
+    tenant_id: str,
+    moment: datetime | None = None,
+) -> bool:
+    normalized = normalize_human_handoff_config(config)
+    service_hours_id = normalized.get("service_hours_id")
+    if not service_hours_id:
+        return True
+
+    item = await ServiceHoursRepository.get_by_id(db, int(service_hours_id))
+    if item is None or item.tenant_id != tenant_id:
+        return True
+
+    try:
+        result = ServiceHoursEvaluator.evaluate(
+            item, moment or datetime.now(timezone.utc)
+        )
+    except Exception:
+        logger.warning(
+            "Failed to evaluate human handoff service hours id=%s",
+            service_hours_id,
+            exc_info=True,
+        )
+        return False
+    return result.is_in_service
+
+
+def _runtime_parameters_schema(tool) -> dict | None:
+    if (
+        getattr(tool, "is_system", False)
+        and getattr(tool, "tool_type", None) == "notebook"
+        and getattr(tool, "name", None) == "notebook"
+    ):
+        return NOTEBOOK_PARAMETERS_SCHEMA
+    if getattr(tool, "tool_type", None) == HUMAN_HANDOFF_TOOL_TYPE:
+        return build_human_handoff_parameters_schema(getattr(tool, "config", {}) or {})
+    return tool.parameters_schema
 
 
 def _to_openai_tools(tools: list[dict]) -> list[dict]:
@@ -1652,6 +1882,103 @@ def _sanitize_schema(schema: dict) -> dict:
     return cleaned
 
 
+class _HistoryMessages(list):
+    """History messages plus the round counts used by runtime prompt variables."""
+
+    def __init__(
+        self,
+        messages: list[dict] | None = None,
+        *,
+        loaded_round_count: int = 0,
+        tool_trace_round_count: int = 0,
+    ) -> None:
+        super().__init__(messages or [])
+        self.loaded_round_count = loaded_round_count
+        self.tool_trace_round_count = tool_trace_round_count
+
+
+def _datetime_template_vars() -> dict[str, str]:
+    """Return built-in datetime variables for the current LLM call."""
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+
+    weekdays_zh = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+    now = _dt.now(_tz(_td(hours=8)))
+    return {
+        "current_date": now.strftime("%Y-%m-%d"),
+        "current_weekday": weekdays_zh[now.weekday()],
+        "current_time": now.strftime("%H:%M"),
+        "current_datetime": now.strftime("%Y-%m-%d %H:%M"),
+    }
+
+
+def _runtime_template_vars(
+    *,
+    config: EngineConfig,
+    round_number: int,
+    history: list[dict],
+    llm_call_index: int,
+    current_round_messages: list[dict],
+) -> dict[str, str]:
+    """Return per-call runtime variables for system prompt rendering."""
+    completed_tool_calls = sum(
+        1 for message in current_round_messages
+        if message.get("role") == "tool"
+    )
+    remaining_tool_rounds = max(MAX_TOOL_ROUNDS - llm_call_index + 1, 0)
+    return {
+        "context_max_rounds": str(config.context.max_rounds),
+        "context_history_tool_rounds": str(config.context.history_tool_rounds),
+        "context_recent_full_tool_responses": str(
+            config.context.recent_full_tool_responses
+        ),
+        "conversation_round_number": str(round_number),
+        "history_loaded_round_count": str(
+            getattr(history, "loaded_round_count", 0) or 0
+        ),
+        "history_tool_trace_round_count": str(
+            getattr(history, "tool_trace_round_count", 0) or 0
+        ),
+        "llm_call_index_in_round": str(llm_call_index),
+        "completed_tool_call_count_in_round": str(completed_tool_calls),
+        "next_tool_call_index_in_round": str(completed_tool_calls + 1),
+        "max_tool_loop_rounds": str(MAX_TOOL_ROUNDS),
+        "remaining_tool_loop_rounds": str(remaining_tool_rounds),
+    }
+
+
+def _step_metadata(step: Mapping) -> dict:
+    metadata = step.get("metadata") or step.get("metadata_") or {}
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _tool_response_id(step: Mapping) -> str | None:
+    value = _step_metadata(step).get("tool_response_id")
+    if isinstance(value, str):
+        value = value.strip()
+    return value or None
+
+
+def _tool_step_key(step: Mapping) -> tuple[int, int, str]:
+    return (
+        int(step.get("round_number") or 0),
+        int(step.get("step_order") or 0),
+        str(step.get("tool_call_id") or ""),
+    )
+
+
+def _tool_response_reference_content(step: Mapping, tool_response_id: str) -> str:
+    tool_type = step.get("tool_type") or ""
+    if tool_type == "search":
+        prefix = "搜索结果已归档。"
+    elif tool_type in {"doc_query", "doc_grep"}:
+        prefix = "查询结果已归档。"
+    elif tool_type == "tool_response_fetch":
+        prefix = "取回结果已归档。"
+    else:
+        prefix = "工具响应已归档。"
+    return f"{prefix}工具响应 id（tool response id）：{tool_response_id}"
+
+
 async def _build_history(
     db: AsyncSession,
     conversation_id: int,
@@ -1660,11 +1987,11 @@ async def _build_history(
 ) -> list[dict]:
     """Build history messages from past rounds based on context config."""
     if current_round <= 1:
-        return []
+        return _HistoryMessages()
 
     steps = await ConversationStepRepository.get_history_steps(db, conversation_id)
     if not steps:
-        return []
+        return _HistoryMessages()
 
     # Group steps by round
     rounds: dict[int, list] = {}
@@ -1686,7 +2013,25 @@ async def _build_history(
     if history_tool_rounds > 0:
         tool_eligible_rounds = set(sorted_round_nums[-history_tool_rounds:])
 
+    recent_full_limit = config.context.recent_full_tool_responses
+    archivable_tool_steps: list = []
+    for rn in sorted_round_nums:
+        if rn not in tool_eligible_rounds:
+            continue
+        for s in sorted(rounds[rn], key=lambda s: s["step_order"]):
+            if (
+                s.get("status") != "incomplete"
+                and s["step_type"] == "tool_call"
+                and s.get("tool_call_id")
+                and _tool_response_id(s)
+            ):
+                archivable_tool_steps.append(s)
+    recent_full_tool_keys = {
+        _tool_step_key(s) for s in archivable_tool_steps[-recent_full_limit:]
+    }
+
     messages: list[dict] = []
+    actual_tool_trace_rounds: set[int] = set()
     for rn in sorted_round_nums:
         round_steps = sorted(rounds[rn], key=lambda s: s["step_order"])
         include_tools = rn in tool_eligible_rounds
@@ -1708,14 +2053,29 @@ async def _build_history(
                     "content": s.get("content") or None,
                     "tool_calls": s["response_tool_calls"],
                 })
+                actual_tool_trace_rounds.add(rn)
             elif include_tools and st == "tool_call" and s.get("tool_call_id"):
+                tool_response = s.get("tool_response") or ""
+                tool_response_id = _tool_response_id(s)
+                if (
+                    tool_response_id
+                    and _tool_step_key(s) not in recent_full_tool_keys
+                ):
+                    tool_response = _tool_response_reference_content(
+                        s, tool_response_id,
+                    )
                 messages.append({
                     "role": "tool",
                     "tool_call_id": s["tool_call_id"],
-                    "content": s.get("tool_response") or "",
+                    "content": tool_response,
                 })
+                actual_tool_trace_rounds.add(rn)
 
-    return messages
+    return _HistoryMessages(
+        messages,
+        loaded_round_count=len(sorted_round_nums),
+        tool_trace_round_count=len(actual_tool_trace_rounds),
+    )
 
 
 def _assemble_messages(
@@ -1730,6 +2090,125 @@ def _assemble_messages(
     messages.extend(history)
     messages.extend(current_round)
     return messages
+
+
+async def _render_system_prompt(
+    system_prompt: str,
+    template_vars: dict[str, str],
+    tools_defs: list[dict],
+    tool_ctx: "ToolContext",
+) -> str:
+    """Render system prompt with dynamic tool output variables."""
+    if not system_prompt:
+        return ""
+
+    variables = dict(template_vars)
+    if any(
+        tool.get("tool_type") == "notebook" and tool.get("name") == "notebook"
+        for tool in tools_defs
+    ):
+        from app.services.tool_executors.notebook_executor import render_notebook_output
+
+        variables["tool_notebook_output"] = await render_notebook_output(tool_ctx)
+
+    rendered_prompt = render_template(system_prompt, variables)
+    logger.info(
+        "System prompt rendered — template_vars=%s, raw_len=%d, rendered_len=%d",
+        list(variables.keys()) or "none",
+        len(system_prompt),
+        len(rendered_prompt),
+    )
+    return rendered_prompt
+
+
+def _human_handoff_succeeded(tool_def: dict | None, tool_result: str | None) -> bool:
+    return (
+        bool(tool_def)
+        and tool_def.get("tool_type") == HUMAN_HANDOFF_TOOL_TYPE
+        and bool(tool_result)
+        and 'status="recorded"' in tool_result
+    )
+
+
+def _tool_call_status_fields(
+    tool_def: dict | None,
+    tool_result: str | None,
+) -> dict[str, str]:
+    if not (
+        tool_def
+        and tool_def.get("tool_type") == HUMAN_HANDOFF_TOOL_TYPE
+        and tool_result
+    ):
+        return {}
+
+    try:
+        root = ElementTree.fromstring(tool_result)
+    except ElementTree.ParseError:
+        if 'status="error"' not in tool_result:
+            return {}
+        return {
+            "status": "error",
+            "error_message": "Human handoff request failed.",
+        }
+
+    if root.tag != "human_handoff_response" or root.attrib.get("status") != "error":
+        return {}
+
+    code = (root.attrib.get("code") or "").strip()
+    message = (root.text or "").strip() or "Human handoff request failed."
+    return {
+        "status": "error",
+        "error_message": f"{code}: {message}" if code else message,
+    }
+
+
+async def _create_human_handoff_event_step(
+    db: AsyncSession,
+    conv,
+    agent_id: int,
+    round_number: int,
+    tool_step,
+    tool_args: dict,
+    tool_def: dict | None,
+    tool_result: str | None,
+):
+    """Persist the customer-service event step for a successful handoff."""
+    if not _human_handoff_succeeded(tool_def, tool_result):
+        return None
+
+    try:
+        handoff = normalize_human_handoff_arguments(
+            tool_args, (tool_def or {}).get("config") or {}
+        )
+    except ValueError:
+        logger.warning(
+            "Skipping human handoff event because arguments no longer validate",
+            exc_info=True,
+        )
+        return None
+
+    requested_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    payload = {
+        "event_kind": HUMAN_HANDOFF_EVENT_KIND,
+        "schema_version": HUMAN_HANDOFF_SCHEMA_VERSION,
+        "related_tool_call_step_id": tool_step.id,
+        "conversation": {
+            "id": conv.id,
+            "external_id": getattr(conv, "external_id", None),
+        },
+        "tenant_id": conv.tenant_id,
+        "agent_id": agent_id,
+        "requested_at": requested_at,
+        "handoff": handoff,
+    }
+    return await _create_step(db, conv.id, conv.tenant_id, {
+        "round_number": round_number,
+        "step_type": HUMAN_HANDOFF_EVENT_STEP_TYPE,
+        "content": handoff["brief"],
+        "brief": handoff["brief"],
+        "parent_step_id": tool_step.id,
+        "metadata": payload,
+    })
 
 
 async def _execute_pre_recall(

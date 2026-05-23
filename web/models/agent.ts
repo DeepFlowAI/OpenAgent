@@ -29,12 +29,65 @@ export type PreRecallConfig = {
   tool_id: number | null
 }
 
+export type WelcomeMessageBlock =
+  | {
+      type: 'markdown'
+      content: string
+    }
+  | {
+      type: 'embed'
+      embed_code: string
+      height: number
+    }
+
+export type WelcomeMessageConfig = {
+  enabled: boolean
+  blocks: WelcomeMessageBlock[]
+}
+
+export type AIDisclaimerConfig = {
+  enabled: boolean
+  content: string
+}
+
+export type ToolCallLimitReplyConfig = {
+  enabled: boolean
+  /** Markdown source rendered when a turn reaches the tool-call limit. */
+  content: string
+}
+
+export type ConversationSettingsConfig = {
+  welcome_message: WelcomeMessageConfig
+  ai_disclaimer: AIDisclaimerConfig
+  tool_call_limit_reply: ToolCallLimitReplyConfig
+}
+
 export type EngineConfig = {
   system_prompt: string
   model: ModelConfig
   selected_tool_ids: number[]
   context: ContextConfig
   pre_recall: PreRecallConfig
+  conversation_settings: ConversationSettingsConfig
+}
+
+export const DEFAULT_AI_DISCLAIMER_CONTENT = '本内容由AI生成，仅供参考'
+export const DEFAULT_TOOL_CALL_LIMIT_REPLY_CONTENT =
+  '抱歉，本轮回复已达到工具调用上限，暂时无法继续处理。请简化问题、缩小查询范围或稍后重试。'
+
+export const DEFAULT_CONVERSATION_SETTINGS: ConversationSettingsConfig = {
+  welcome_message: {
+    enabled: false,
+    blocks: [],
+  },
+  ai_disclaimer: {
+    enabled: false,
+    content: DEFAULT_AI_DISCLAIMER_CONTENT,
+  },
+  tool_call_limit_reply: {
+    enabled: true,
+    content: DEFAULT_TOOL_CALL_LIMIT_REPLY_CONTENT,
+  },
 }
 
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
@@ -57,6 +110,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     enabled: false,
     tool_id: null,
   },
+  conversation_settings: DEFAULT_CONVERSATION_SETTINGS,
 }
 
 export type CreateAgentPayload = {

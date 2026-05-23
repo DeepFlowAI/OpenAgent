@@ -14,6 +14,22 @@ logger = logging.getLogger(__name__)
 class SliceRepository:
 
     @staticmethod
+    async def get_by_id_for_document(
+        db: AsyncSession,
+        slice_id: int,
+        document_id: int,
+        tenant_id: str,
+    ) -> Slice | None:
+        result = await db.execute(
+            select(Slice).where(
+                Slice.id == slice_id,
+                Slice.document_id == document_id,
+                Slice.tenant_id == tenant_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
     async def get_paginated(
         db: AsyncSession,
         document_id: int,

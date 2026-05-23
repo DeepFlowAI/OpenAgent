@@ -9,6 +9,8 @@ import { useToast } from '@/app/components/base/toast'
 import { getErrorMessage, uploadImage } from '@/service/base'
 import { Button } from '@/app/components/base/button'
 import { Modal } from '@/app/components/base/modal'
+import { Switch } from '@/app/components/base/switch'
+import { normalizeSamePageNavigationAllowlist } from '@/utils/same-page-navigation-allowlist'
 import {
   IconArrowLeft,
   IconCopy,
@@ -68,11 +70,13 @@ type AppearanceConfig = {
 
 type BehaviorConfig = {
   inputPlaceholder: string
+  feedbackEnabled: boolean
 }
 
 type ChannelConfig = {
   appearance: AppearanceConfig
   behavior: BehaviorConfig
+  samePageNavigationUrlAllowlist: string[]
 }
 
 const DEFAULT_APPEARANCE: AppearanceConfig = {
@@ -125,14 +129,21 @@ const SIDEBAR_FOOTER_LOGO_MAX = 4
 
 const DEFAULT_BEHAVIOR: BehaviorConfig = {
   inputPlaceholder: '输入消息...',
+  feedbackEnabled: false,
 }
 
 function parseConfig(raw: Record<string, unknown>): ChannelConfig {
   const a = (raw?.appearance ?? {}) as Partial<AppearanceConfig>
   const b = (raw?.behavior ?? {}) as Partial<BehaviorConfig>
+  const allowlist = normalizeSamePageNavigationAllowlist(
+    Array.isArray(raw?.samePageNavigationUrlAllowlist)
+      ? raw.samePageNavigationUrlAllowlist.filter((item): item is string => typeof item === 'string')
+      : null
+  )
   return {
     appearance: { ...DEFAULT_APPEARANCE, ...a },
     behavior: { ...DEFAULT_BEHAVIOR, ...b },
+    samePageNavigationUrlAllowlist: allowlist.patterns,
   }
 }
 
@@ -151,10 +162,12 @@ export default function EditWebSdkChannelPage() {
 
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
+  const [errors, setErrors] = useState<Record<string, string>>({})
   const [agentId, setAgentId] = useState<number | null>(null)
   const [accessMode, setAccessMode] = useState<'url' | 'embed'>('url')
   const [appearance, setAppearance] = useState<AppearanceConfig>(DEFAULT_APPEARANCE)
   const [behavior, setBehavior] = useState<BehaviorConfig>(DEFAULT_BEHAVIOR)
+  const [samePageNavigationUrlAllowlistText, setSamePageNavigationUrlAllowlistText] = useState('')
   const [dirty, setDirty] = useState(false)
   const [showLeaveModal, setShowLeaveModal] = useState(false)
   const [pendingLeave, setPendingLeave] = useState(false)
@@ -168,6 +181,8 @@ export default function EditWebSdkChannelPage() {
     const cfg = parseConfig(channel.config)
     setAppearance(cfg.appearance)
     setBehavior(cfg.behavior)
+    setSamePageNavigationUrlAllowlistText(cfg.samePageNavigationUrlAllowlist.join('\n'))
+    setErrors({})
     setDirty(false)
   }, [channel])
 
@@ -183,7 +198,28 @@ export default function EditWebSdkChannelPage() {
     setDirty(true)
   }, [])
 
+  const validateForm = (): { valid: boolean; samePageNavigationUrlAllowlist: string[] } => {
+    const errs: Record<string, string> = {}
+    if (!name.trim()) errs.name = '请输入渠道名称'
+    else if (name.length > 64) errs.name = '名称不能超过 64 个字符'
+    if (description.length > 500) errs.description = '描述不能超过 500 个字符'
+
+    const allowlist = normalizeSamePageNavigationAllowlist(samePageNavigationUrlAllowlistText)
+    if (allowlist.error) {
+      errs.samePageNavigationUrlAllowlist = allowlist.error
+    }
+
+    setErrors(errs)
+    return {
+      valid: Object.keys(errs).length === 0,
+      samePageNavigationUrlAllowlist: allowlist.patterns,
+    }
+  }
+
   const handleSave = async () => {
+    const validation = validateForm()
+    if (!validation.valid) return
+
     // Sanitize sidebar-footer fields: trim text and drop empty logos
     const cleanedAppearance: AppearanceConfig = {
       ...appearance,
@@ -218,14 +254,23 @@ export default function EditWebSdkChannelPage() {
       await updateMutation.mutateAsync({
         id: channelId,
         data: {
-          name,
-          description: description || null,
+          name: name.trim(),
+          description: description.trim() || null,
           agent_id: agentId,
           access_mode: accessMode,
-          config: { appearance: cleanedAppearance, behavior },
+          config: {
+            appearance: cleanedAppearance,
+            behavior,
+            samePageNavigationUrlAllowlist: validation.samePageNavigationUrlAllowlist,
+          },
         },
       })
       setAppearance(cleanedAppearance)
+      setSamePageNavigationUrlAllowlistText(
+        validation.samePageNavigationUrlAllowlist.join('\n')
+      )
+      setName(name.trim())
+      setDescription(description.trim())
       toast('已保存', 'success')
       setDirty(false)
     } catch (err) {
@@ -254,6 +299,13 @@ export default function EditWebSdkChannelPage() {
     if (typeof window === 'undefined' || !channelToken) return ''
     return `${window.location.origin}/chat/${channelToken}`
   }, [channelToken])
+
+  const testChatPageUrl = useMemo(() => {
+    if (!chatPageUrl) return ''
+    const url = new URL(chatPageUrl)
+    url.searchParams.set('test', 'true')
+    return url.toString()
+  }, [chatPageUrl])
 
   const embedSnippet = useMemo(() => {
     if (typeof window === 'undefined' || !channelToken) return ''
@@ -302,6 +354,50 @@ export default function EditWebSdkChannelPage() {
       <div className="flex-1 overflow-auto px-10 py-8">
         <div className="flex flex-col gap-4">
 
+          {/* ── Section: 基础信息 ── */}
+          <SectionCard>
+            <SectionTitle>基础信息</SectionTitle>
+            <div className="flex max-w-[560px] flex-col gap-4">
+              <div className="flex flex-col gap-2">
+                <label className="text-sm font-medium text-[#404040]">
+                  名称 <span className="text-[#DC2626]">*</span>
+                </label>
+                <input
+                  className={`h-10 rounded-lg border bg-white px-3 text-sm text-[#18181B] outline-none transition-colors placeholder:text-[#A1A1AA] focus:border-[#1A1A1A] ${
+                    errors.name ? 'border-[#DC2626]' : 'border-[#E4E4E7]'
+                  }`}
+                  placeholder="请输入渠道名称"
+                  value={name}
+                  onChange={(e) => {
+                    setName(e.target.value)
+                    markDirty()
+                    if (errors.name) setErrors((prev) => ({ ...prev, name: '' }))
+                  }}
+                  maxLength={64}
+                />
+                {errors.name && <span className="text-xs text-[#DC2626]">{errors.name}</span>}
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="text-sm font-medium text-[#404040]">描述</label>
+                <textarea
+                  className={`min-h-[80px] resize-none rounded-lg border bg-white px-3 py-2 text-sm text-[#18181B] outline-none transition-colors placeholder:text-[#A1A1AA] focus:border-[#1A1A1A] ${
+                    errors.description ? 'border-[#DC2626]' : 'border-[#E4E4E7]'
+                  }`}
+                  placeholder="选填，用于内部识别"
+                  value={description}
+                  onChange={(e) => {
+                    setDescription(e.target.value)
+                    markDirty()
+                    if (errors.description) setErrors((prev) => ({ ...prev, description: '' }))
+                  }}
+                  maxLength={500}
+                />
+                {errors.description && <span className="text-xs text-[#DC2626]">{errors.description}</span>}
+              </div>
+            </div>
+          </SectionCard>
+
           {/* ── Section: 接入模式 ── */}
           <SectionCard>
             <SectionTitle>接入模式</SectionTitle>
@@ -318,16 +414,30 @@ export default function EditWebSdkChannelPage() {
 
             {/* URL mode card */}
             {accessMode === 'url' && (
-              <div className="rounded-lg bg-[#FAFAFA] p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[13px] font-medium text-[#404040]">会话页链接</span>
-                  <span className="shrink-0 text-xs text-[#A1A1AA]">URL 模式</span>
-                </div>
-                <div className="mt-3 flex items-center gap-2">
-                  <div className="flex h-9 min-w-0 flex-1 items-center rounded-lg border border-[#E4E4E7] bg-white px-3">
-                    <span className="truncate text-[13px] text-[#71717A]">{chatPageUrl}</span>
+              <div className="flex flex-col gap-4 rounded-lg bg-[#FAFAFA] p-3">
+                <div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[13px] font-medium text-[#404040]">测试链接</span>
                   </div>
-                  <CopyButton text={chatPageUrl} label="复制链接" />
+                  <div className="mt-3 flex items-center gap-2">
+                    <div className="flex h-9 min-w-0 flex-1 items-center rounded-lg border border-[#E4E4E7] bg-white px-3">
+                      <span className="truncate text-[13px] text-[#71717A]">{testChatPageUrl}</span>
+                    </div>
+                    <CopyButton text={testChatPageUrl} label="复制链接" />
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[13px] font-medium text-[#404040]">会话页链接</span>
+                    <span className="shrink-0 text-xs text-[#A1A1AA]">URL 模式</span>
+                  </div>
+                  <div className="mt-3 flex items-center gap-2">
+                    <div className="flex h-9 min-w-0 flex-1 items-center rounded-lg border border-[#E4E4E7] bg-white px-3">
+                      <span className="truncate text-[13px] text-[#71717A]">{chatPageUrl}</span>
+                    </div>
+                    <CopyButton text={chatPageUrl} label="复制链接" />
+                  </div>
                 </div>
               </div>
             )}
@@ -505,6 +615,15 @@ export default function EditWebSdkChannelPage() {
               <TextInput width={280} value={behavior.inputPlaceholder} placeholder="输入消息..."
                 onChange={(v) => updateBehavior({ inputPlaceholder: v })} />
             </FieldRow>
+            <FieldRow label="评价功能">
+              <Switch
+                checked={behavior.feedbackEnabled}
+                onChange={(checked) => updateBehavior({ feedbackEnabled: checked })}
+              />
+              <span className="text-[13px] text-[#71717A]">
+                开启后，访客可对 Agent 回复提交赞 / 踩和文字评价
+              </span>
+            </FieldRow>
             <ColorGrid items={[
               { label: '按钮背景色', value: appearance.sendMessageButtonBgColor, onChange: (v) => updateAppearance({ sendMessageButtonBgColor: v }) },
               { label: '按钮图标色', value: appearance.sendMessageButtonIconColor, onChange: (v) => updateAppearance({ sendMessageButtonIconColor: v }) },
@@ -596,6 +715,55 @@ export default function EditWebSdkChannelPage() {
                 placeholder="https://..."
                 onChange={(v) => updateAppearance({ sidebarFooterLinkUrl: v })} />
             </FieldRow>
+          </SectionCard>
+
+          {/* ── Section: 当前页面跳转 URL 白名单 ── */}
+          <SectionCard>
+            <SectionTitle>当前页面跳转 URL 白名单</SectionTitle>
+            <p className="-mt-1 text-xs leading-relaxed text-[#71717A]">
+              每行一条 URL 规则，支持 * 通配符。命中的链接将在当前页面打开；其它链接仍在新标签页打开。
+            </p>
+            <div className="flex max-w-[720px] flex-col gap-2">
+              <label
+                className="text-sm font-medium text-[#404040]"
+                htmlFor="same-page-navigation-url-allowlist"
+              >
+                URL 规则
+              </label>
+              <textarea
+                id="same-page-navigation-url-allowlist"
+                className={`min-h-[112px] resize-y rounded-lg border bg-white px-3 py-2 font-mono text-sm text-[#18181B] outline-none transition-colors placeholder:text-[#A1A1AA] focus:border-[#1A1A1A] ${
+                  errors.samePageNavigationUrlAllowlist ? 'border-[#DC2626]' : 'border-[#E4E4E7]'
+                }`}
+                placeholder={[
+                  'https://login.example.com/*',
+                  'https://*.example.com/oauth/*',
+                  'https://example.com/account/bind?redirect=*',
+                ].join('\n')}
+                value={samePageNavigationUrlAllowlistText}
+                onChange={(e) => {
+                  setSamePageNavigationUrlAllowlistText(e.target.value)
+                  markDirty()
+                  if (errors.samePageNavigationUrlAllowlist) {
+                    setErrors((prev) => ({ ...prev, samePageNavigationUrlAllowlist: '' }))
+                  }
+                }}
+                aria-invalid={Boolean(errors.samePageNavigationUrlAllowlist)}
+                aria-describedby={
+                  errors.samePageNavigationUrlAllowlist
+                    ? 'same-page-navigation-url-allowlist-error'
+                    : undefined
+                }
+              />
+              {errors.samePageNavigationUrlAllowlist && (
+                <span
+                  id="same-page-navigation-url-allowlist-error"
+                  className="text-xs text-[#DC2626]"
+                >
+                  {errors.samePageNavigationUrlAllowlist}
+                </span>
+              )}
+            </div>
           </SectionCard>
         </div>
       </div>

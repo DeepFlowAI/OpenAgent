@@ -2,7 +2,7 @@ export type AgentTool = {
   id: number
   agent_id: number
   tenant_id: string
-  tool_type: 'search' | 'doc_query' | 'doc_grep' | 'notebook' | 'tool_response_fetch' | 'python_code'
+  tool_type: 'search' | 'doc_query' | 'doc_grep' | 'notebook' | 'tool_response_fetch' | 'python_code' | 'human_handoff'
   name: string
   description: string | null
   is_system: boolean
@@ -37,4 +37,5 @@ export const TOOL_TYPE_LABELS: Record<AgentTool['tool_type'], { zh: string; en: 
   notebook: { zh: '笔记', en: 'Notebook' },
   tool_response_fetch: { zh: '按ID取回', en: 'ID Fetch' },
   python_code: { zh: 'Python 代码', en: 'Python Code' },
+  human_handoff: { zh: '转人工', en: 'Human Handoff' },
 }

@@ -21,9 +21,17 @@ export type ConversationListParams = {
   end_time?: string
   status_filter?: string
   source?: string
+  channel_id?: string
+  channel_source?: string
+  message_content?: string
   conversation_id?: string
   external_user_id?: string
   search?: string
+}
+
+export type ConversationChannelOption = {
+  id: number
+  name: string
 }
 
 export const useConversations = (
@@ -44,6 +52,21 @@ export const useConversations = (
             ),
           },
         }
+      ),
+    enabled: !!agentId && !!tenantId,
+    refetchOnMount: 'always',
+  })
+
+export const useConversationChannelOptions = (
+  agentId: number,
+  tenantId: string
+) =>
+  useQuery({
+    queryKey: [...conversationKeys.all, 'channel-options', agentId, tenantId],
+    queryFn: () =>
+      get<{ items: ConversationChannelOption[] }>(
+        `v1/agents/${agentId}/conversations/channel-options`,
+        { searchParams: { tenant_id: tenantId } }
       ),
     enabled: !!agentId && !!tenantId,
   })

@@ -1,6 +1,8 @@
 """
 Chat request/response schemas for SSE streaming chat endpoint.
 """
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -11,7 +13,10 @@ class CustomerContext(BaseModel):
     email: str | None = Field(None, max_length=256)
     phone: str | None = Field(None, max_length=32)
     avatar_url: str | None = Field(None, max_length=1024)
-    source: str | None = Field(None, pattern=r"^(chat|api|embed)$")
+    source: str | None = Field(None, max_length=32)
+    channel_id: int | None = Field(None, ge=1)
+    channel_source: Any | None = None
+    is_test: bool = False
     title: str | None = None
     metadata: dict | None = None
 
@@ -66,4 +71,14 @@ class ChatRequest(BaseModel):
         "displays and the full assistant_reset that the older step-replay "
         "fallback caused. If the buffer evicted the cursor's window, the "
         "server transparently falls back to step-replay.",
+    )
+
+
+class ChatCancelRequest(BaseModel):
+    """Request body for explicitly cancelling a running chat turn."""
+    client_message_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="The client_message_id of the user turn to cancel.",
     )

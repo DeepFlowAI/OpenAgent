@@ -13,6 +13,7 @@ is always ``true`` for them.
 from fastapi import APIRouter, Request
 
 from app.configs.settings import settings
+from app.libs.llm.model_catalog import ui_models_as_dicts
 
 router = APIRouter(prefix="/system", tags=["System"])
 
@@ -27,4 +28,5 @@ async def get_system_info(request: Request) -> dict:
         "edition": "enterprise" if has_tenants_ext else "community",
         "single_tenant_mode": not has_tenants_ext,
         "default_tenant_id": settings.DEFAULT_TENANT_ID,
+        "llm_models": ui_models_as_dicts(settings.LLM_UI_MODELS),
     }

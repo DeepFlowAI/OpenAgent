@@ -83,6 +83,13 @@ class Settings(BaseSettings):
     # do NOT retry (avoid duplicating large chunks of output).
     LLM_STREAM_RESET_MAX_CHARS: int = Field(default=50, ge=0)
 
+    # Comma-separated Agent UI model list: ``id`` or ``id:Label`` (e.g.
+    # ``kimi-k2.6:Kimi K2.6,glm-5.1:GLM-5.1``). Empty = full built-in catalog.
+    LLM_UI_MODELS: str = Field(default="")
+    # Comma-separated provider channels in fallback order (e.g. ``aliyun-bailian`` or
+    # ``aliyun-bailian,openrouter``). Empty = built-in multi-provider fallback chain.
+    LLM_PROVIDER_CHANNELS: str = Field(default="")
+
     # ── Default Tenant (auto-provisioned on first startup) ────────────────
     # On first boot, if the `tenants` table is empty, the seed step creates
     # one tenant using these values. Open-source users log in at `/login`
@@ -101,8 +108,17 @@ class Settings(BaseSettings):
     # SiliconFlow API (Embedding & Reranker)
     SILICONFLOW_API_KEY: str = Field(default="")
     SILICONFLOW_BASE_URL: str = Field(default="https://api.siliconflow.cn/v1")
+    # Knowledge-base backends: siliconflow | aliyun-bailian. Empty = auto from API keys.
+    EMBEDDING_PROVIDER: str = Field(default="")
+    RERANKER_PROVIDER: str = Field(default="")
     EMBEDDING_MODEL: str = Field(default="Pro/BAAI/bge-m3")
     RERANKER_MODEL: str = Field(default="Pro/BAAI/bge-reranker-v2-m3")
+    EMBEDDING_DIMENSION: int = Field(default=1024, ge=64)
+    EMBEDDING_BATCH_SIZE: int = Field(default=10, ge=1, le=25)
+    EMBEDDING_BATCH_CONCURRENCY: int = Field(default=3, ge=1, le=8)
+    ALIYUN_BAILIAN_RERANK_URL: str = Field(
+        default="https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+    )
 
     # Alibaba Cloud OSS
     OSS_ACCESS_KEY: str = Field(default="")

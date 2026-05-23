@@ -118,7 +118,7 @@ def main() -> int:
     checks = [
         ("aliyun-bailian", "MiniMax/MiniMax-M2.7", "ALIYUN_BAILIAN_API_KEY", "ALIYUN_BAILIAN_BASE_URL"),
         ("aliyun-bailian", "kimi/kimi-k2.6", "ALIYUN_BAILIAN_API_KEY", "ALIYUN_BAILIAN_BASE_URL"),
-        ("aliyun-bailian", "glm-5.1", "ALIYUN_BAILIAN_API_KEY", "ALIYUN_BAILIAN_BASE_URL"),
+        ("aliyun-bailian", "ZHIPU/GLM-5.1", "ALIYUN_BAILIAN_API_KEY", "ALIYUN_BAILIAN_BASE_URL"),
         ("minimax-official", "MiniMax-M2.7", "MINIMAX_API_KEY", "MINIMAX_BASE_URL"),
         ("moonshot-official", "kimi-k2.6", "MOONSHOT_API_KEY", "MOONSHOT_BASE_URL", 1),
         ("zhipu-official", "glm-5.1", "ZHIPU_API_KEY", "ZHIPU_BASE_URL"),

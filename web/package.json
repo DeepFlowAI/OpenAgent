@@ -9,7 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@assistant-ui/react": "^0.12.24",
+    "@assistant-ui/react": "^0.14.7",
     "@base-ui/react": "^1.4.0",
     "@embedpdf/react-pdf-viewer": "^2.11.1",
     "@tabler/icons-react": "^3.40.0",

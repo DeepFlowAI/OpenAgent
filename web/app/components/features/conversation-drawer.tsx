@@ -1,14 +1,13 @@
 'use client'
 
 import { useState, useMemo, useCallback, useEffect } from 'react'
-import dynamic from 'next/dynamic'
 import { cn } from '@/utils/classnames'
-import { stripMarkdownHeadingAnchorsRehypeRewrite } from '@/utils/strip-markdown-heading-anchors'
 import { Badge } from '@/app/components/base/badge'
 import { useConversation } from '@/service/use-conversation'
 import { useConversationTimeline, useStepDetail } from '@/service/use-conversation-step'
 import { LlmDetailModal } from '@/app/components/features/llm-detail-modal'
-import { STATUS_LABELS, SOURCE_LABELS } from '@/models/conversation'
+import { MarkdownContent } from '@/app/components/features/chat-message-blocks'
+import { STATUS_LABELS, getSourceLabel } from '@/models/conversation'
 import type { Conversation, StepTimelineItem } from '@/models/conversation'
 import {
   IconX,
@@ -20,10 +19,6 @@ import {
   IconCheck,
   IconTool,
 } from '@tabler/icons-react'
-
-const MarkdownPreview = dynamic(() => import('@uiw/react-markdown-preview'), {
-  ssr: false,
-})
 
 type ConversationDrawerProps = {
   agentId: number
@@ -145,6 +140,12 @@ export function ConversationDrawer({
     return String(n)
   }
 
+  const formatFeedbackRating = (rating: StepTimelineItem['feedback_rating']) => {
+    if (rating === 'like') return '赞'
+    if (rating === 'dislike') return '踩'
+    return ''
+  }
+
   const formatDuration = () => {
     if (!detail?.duration_seconds) return '—'
     const s = detail.duration_seconds
@@ -204,11 +205,7 @@ export function ConversationDrawer({
         if (step.content && step.response_tool_calls && (step.response_tool_calls as unknown[]).length > 0) {
           elements.push(
             <div key={`llm-content-${step.id}`} className="mb-2 rounded-lg bg-[#F5F5F5] px-4 py-3" data-color-mode="light">
-              <MarkdownPreview
-                source={step.content}
-                style={{ background: 'transparent', fontSize: 14 }}
-                rehypeRewrite={stripMarkdownHeadingAnchorsRehypeRewrite}
-              />
+              <MarkdownContent source={step.content} />
             </div>,
           )
         }
@@ -240,15 +237,13 @@ export function ConversationDrawer({
       }
 
       if (step.step_type === 'assistant_message') {
+        const feedbackRating = formatFeedbackRating(step.feedback_rating)
+        const feedbackComment = step.feedback_comment?.trim() ?? ''
         elements.push(
           <div key={`assistant-${step.id}`} className="mb-2">
             <div className="rounded-lg bg-[#F5F5F5] px-4 py-3" data-color-mode="light">
               {step.content ? (
-                <MarkdownPreview
-                  source={step.content}
-                  style={{ background: 'transparent', fontSize: 14 }}
-                  rehypeRewrite={stripMarkdownHeadingAnchorsRehypeRewrite}
-                />
+                <MarkdownContent source={step.content} />
               ) : (
                 <span className="text-sm text-[#A1A1AA]">(空回复)</span>
               )}
@@ -286,6 +281,20 @@ export function ConversationDrawer({
                 </button>
               )}
             </div>
+            {(feedbackRating || feedbackComment) && (
+              <div className="mt-2 rounded-lg border border-[#E5E5E5] bg-white px-3 py-2 text-xs">
+                <div className="flex items-start gap-2">
+                  <span className="shrink-0 text-[#737373]">评价</span>
+                  <span className="text-[#18181B]">{feedbackRating || '—'}</span>
+                </div>
+                <div className="mt-1 flex items-start gap-2">
+                  <span className="shrink-0 text-[#737373]">评价内容</span>
+                  <span className="min-w-0 whitespace-pre-wrap break-words text-[#18181B]">
+                    {feedbackComment || '—'}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>,
         )
       }
@@ -413,8 +422,32 @@ export function ConversationDrawer({
 
                   <SideInfoRow label="来源">
                     <Badge variant={infoSource.source === 'api' ? 'warning' : 'default'}>
-                      {SOURCE_LABELS[infoSource.source] || infoSource.source}
+                      {getSourceLabel(infoSource.source)}
                     </Badge>
+                  </SideInfoRow>
+
+                  <SideInfoRow label="渠道配置">
+                    <span
+                      className="inline-block max-w-[140px] truncate text-xs text-[#1a1a1a]"
+                      title={infoSource.channel_name || undefined}
+                    >
+                      {infoSource.channel_name || '—'}
+                    </span>
+                  </SideInfoRow>
+
+                  <SideInfoRow label="自定义渠道标识">
+                    <span
+                      className="inline-block max-w-[140px] truncate text-xs text-[#1a1a1a]"
+                      title={infoSource.channel_source || undefined}
+                    >
+                      {infoSource.channel_source || '—'}
+                    </span>
+                  </SideInfoRow>
+
+                  <SideInfoRow label="测试">
+                    <span className="text-xs text-[#1a1a1a]">
+                      {infoSource.is_test ? '是' : '否'}
+                    </span>
                   </SideInfoRow>
 
                   <SideInfoRow label="开始时间">

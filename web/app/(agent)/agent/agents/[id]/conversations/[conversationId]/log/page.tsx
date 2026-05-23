@@ -1,15 +1,14 @@
 'use client'
 
 import { useState, useMemo, useCallback } from 'react'
-import dynamic from 'next/dynamic'
 import { useParams, useRouter } from 'next/navigation'
 import { cn } from '@/utils/classnames'
-import { stripMarkdownHeadingAnchorsRehypeRewrite } from '@/utils/strip-markdown-heading-anchors'
 import { Badge } from '@/app/components/base/badge'
 import { useConversation } from '@/service/use-conversation'
 import { useConversationTimeline, useStepDetail } from '@/service/use-conversation-step'
 import { LlmDetailModal } from '@/app/components/features/llm-detail-modal'
-import { STATUS_LABELS, SOURCE_LABELS } from '@/models/conversation'
+import { MarkdownContent } from '@/app/components/features/chat-message-blocks'
+import { STATUS_LABELS, getSourceLabel } from '@/models/conversation'
 import type { StepTimelineItem } from '@/models/conversation'
 import {
   IconArrowLeft,
@@ -22,10 +21,6 @@ import {
   IconTool,
   IconDownload,
 } from '@tabler/icons-react'
-
-const MarkdownPreview = dynamic(() => import('@uiw/react-markdown-preview'), {
-  ssr: false,
-})
 
 type RoundGroup = {
   roundNumber: number
@@ -44,6 +39,8 @@ type ConversationExportRow = {
   userContent: string
   thinkingContent: string
   assistantContent: string
+  feedbackRating: string
+  feedbackComment: string
   inputTokens: number
   outputTokens: number
   roundHasError: boolean
@@ -60,6 +57,8 @@ const EXPORT_COLUMNS = [
   '用户消息内容',
   'Agent 推理过程',
   'Agent 消息内容',
+  '评价',
+  '评价内容',
   '输入 Token',
   '输出 Token',
   'round_has_error',
@@ -98,6 +97,12 @@ function buildAgentReasoningExport(orderedAgentSteps: StepTimelineItem[]): strin
   return segments.join('\n\n---\n\n')
 }
 
+function formatFeedbackRating(rating: StepTimelineItem['feedback_rating']): string {
+  if (rating === 'like') return '赞'
+  if (rating === 'dislike') return '踩'
+  return ''
+}
+
 function buildConversationExportRows(
   conversation: { id: number; external_id: string; started_at: string | null },
   rounds: RoundGroup[]
@@ -109,6 +114,14 @@ function buildConversationExportRows(
     const llmSteps = orderedAgentSteps.filter((step) => step.step_type === 'llm_call')
     const assistantSteps = orderedAgentSteps.filter((step) => step.step_type === 'assistant_message')
     const roundSteps = [round.userMessage, ...orderedAgentSteps]
+    const feedbackRating = assistantSteps
+      .map((step) => formatFeedbackRating(step.feedback_rating))
+      .filter(Boolean)
+      .join('；')
+    const feedbackComment = assistantSteps
+      .map((step) => step.feedback_comment?.trim() ?? '')
+      .filter(Boolean)
+      .join('；')
 
     return [{
       externalId: conversation.external_id,
@@ -124,6 +137,8 @@ function buildConversationExportRows(
         .map((step) => step.content?.trim() ?? '')
         .filter(Boolean)
         .join('\n\n'),
+      feedbackRating,
+      feedbackComment,
       inputTokens: llmSteps.reduce((sum, step) => sum + (step.input_tokens ?? 0), 0),
       outputTokens: llmSteps.reduce((sum, step) => sum + (step.output_tokens ?? 0), 0),
       roundHasError: roundSteps.some((step) => step.status !== 'success'),
@@ -145,6 +160,8 @@ function buildConversationExportCsv(rows: ConversationExportRow[]) {
       row.userContent,
       row.thinkingContent,
       row.assistantContent,
+      row.feedbackRating,
+      row.feedbackComment,
       row.inputTokens,
       row.outputTokens,
       row.roundHasError,
@@ -328,11 +345,7 @@ export default function ConversationLogPage() {
         if (step.content && step.response_tool_calls && (step.response_tool_calls as unknown[]).length > 0) {
           elements.push(
             <div key={`llm-content-${step.id}`} className="mb-2 rounded-lg bg-[#F5F5F5] px-4 py-3" data-color-mode="light">
-              <MarkdownPreview
-                source={step.content}
-                style={{ background: 'transparent', fontSize: 14 }}
-                rehypeRewrite={stripMarkdownHeadingAnchorsRehypeRewrite}
-              />
+              <MarkdownContent source={step.content} />
             </div>
           )
         }
@@ -366,15 +379,13 @@ export default function ConversationLogPage() {
       }
 
       if (step.step_type === 'assistant_message') {
+        const feedbackRating = formatFeedbackRating(step.feedback_rating)
+        const feedbackComment = step.feedback_comment?.trim() ?? ''
         elements.push(
           <div key={`assistant-${step.id}`} className="mb-2">
             <div className="rounded-lg bg-[#F5F5F5] px-4 py-3" data-color-mode="light">
               {step.content ? (
-                <MarkdownPreview
-                  source={step.content}
-                  style={{ background: 'transparent', fontSize: 14 }}
-                  rehypeRewrite={stripMarkdownHeadingAnchorsRehypeRewrite}
-                />
+                <MarkdownContent source={step.content} />
               ) : (
                 <span className="text-sm text-[#A1A1AA]">(空回复)</span>
               )}
@@ -409,6 +420,20 @@ export default function ConversationLogPage() {
                 </button>
               )}
             </div>
+            {(feedbackRating || feedbackComment) && (
+              <div className="mt-2 rounded-lg border border-[#E5E5E5] bg-white px-3 py-2 text-xs">
+                <div className="flex items-start gap-2">
+                  <span className="shrink-0 text-[#737373]">评价</span>
+                  <span className="text-[#18181B]">{feedbackRating || '—'}</span>
+                </div>
+                <div className="mt-1 flex items-start gap-2">
+                  <span className="shrink-0 text-[#737373]">评价内容</span>
+                  <span className="min-w-0 whitespace-pre-wrap break-words text-[#18181B]">
+                    {feedbackComment || '—'}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         )
       }
@@ -531,8 +556,32 @@ export default function ConversationLogPage() {
 
               <SideInfoRow label="来源">
                 <Badge variant={conversation.source === 'api' ? 'warning' : 'default'}>
-                  {SOURCE_LABELS[conversation.source] || conversation.source}
+                  {getSourceLabel(conversation.source)}
                 </Badge>
+              </SideInfoRow>
+
+              <SideInfoRow label="渠道配置">
+                <span
+                  className="inline-block max-w-[150px] truncate text-xs text-[#1a1a1a]"
+                  title={conversation.channel_name || undefined}
+                >
+                  {conversation.channel_name || '—'}
+                </span>
+              </SideInfoRow>
+
+              <SideInfoRow label="自定义渠道标识">
+                <span
+                  className="inline-block max-w-[150px] truncate text-xs text-[#1a1a1a]"
+                  title={conversation.channel_source || undefined}
+                >
+                  {conversation.channel_source || '—'}
+                </span>
+              </SideInfoRow>
+
+              <SideInfoRow label="测试">
+                <span className="text-xs text-[#1a1a1a]">
+                  {conversation.is_test ? '是' : '否'}
+                </span>
               </SideInfoRow>
 
               <SideInfoRow label="开始时间">

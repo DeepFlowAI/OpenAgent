@@ -21,6 +21,35 @@ class ChannelRepository:
         return result.scalar_one_or_none()
 
     @staticmethod
+    async def get_names_by_ids(
+        db: AsyncSession, tenant_id: str, channel_ids: list[int]
+    ) -> dict[int, str]:
+        if not channel_ids:
+            return {}
+        result = await db.execute(
+            select(Channel.id, Channel.name).where(
+                Channel.tenant_id == tenant_id,
+                Channel.id.in_(channel_ids),
+            )
+        )
+        return {row.id: row.name for row in result.all()}
+
+    @staticmethod
+    async def get_web_sdk_options_by_agent(
+        db: AsyncSession, tenant_id: str, agent_id: int
+    ) -> list[Channel]:
+        result = await db.execute(
+            select(Channel)
+            .where(
+                Channel.tenant_id == tenant_id,
+                Channel.agent_id == agent_id,
+                Channel.channel_type == "web-sdk",
+            )
+            .order_by(Channel.updated_at.desc())
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
     async def get_by_tenant_and_name(
         db: AsyncSession, tenant_id: str, name: str
     ) -> Channel | None:

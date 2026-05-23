@@ -55,6 +55,13 @@ class ConversationStep(Base):
         Integer, ForeignKey("conversation_steps.id", ondelete="SET NULL"), nullable=True
     )
 
+    # ── Visitor feedback (populated on assistant_message steps) ──
+    feedback_rating: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    feedback_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    feedback_updated_at: Mapped[datetime | None] = mapped_column(
+        TIMESTAMP(timezone=True), nullable=True
+    )
+
     # ── Sub-req 3: client-supplied idempotency key. Stable across all retries
     # of one logical user turn so the engine can detect duplicate submissions
     # and auto-resume instead of creating a second user_message + LLM round.

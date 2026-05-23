@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { get, post } from './base'
+import { knowledgeBaseKeys } from './use-knowledge-base'
 import type { Document, Slice, SyncLog } from '@/models/document'
 import type { PaginatedResponse } from '@/models/common'
 
@@ -63,6 +64,10 @@ export const useSyncLogs = (kbId: number) =>
         `v1/knowledge-bases/${kbId}/sync-logs`
       ),
     enabled: !!kbId,
+    refetchInterval: (query) => {
+      const items = query.state.data?.items ?? []
+      return items.some((log) => log.status === 'running') ? 5000 : false
+    },
   })
 
 export type SyncMode = 'auto' | 'full'
@@ -77,6 +82,30 @@ export const useTriggerSync = () => {
       ),
     onSuccess: (_, { kbId }) => {
       qc.invalidateQueries({ queryKey: documentKeys.syncLogs(kbId) })
+      qc.invalidateQueries({ queryKey: documentKeys.lists() })
+    },
+  })
+}
+
+export const useCancelSync = () => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({
+      kbId,
+      syncLogId,
+    }: {
+      kbId: number
+      syncLogId?: number
+    }) =>
+      post<{ sync_log_id: number; status: string }>(
+        `v1/knowledge-bases/${kbId}/sync/cancel`,
+        {
+          searchParams: syncLogId ? { sync_log_id: syncLogId } : undefined,
+        },
+      ),
+    onSuccess: (_, { kbId }) => {
+      qc.invalidateQueries({ queryKey: documentKeys.syncLogs(kbId) })
+      qc.invalidateQueries({ queryKey: knowledgeBaseKeys.detail(kbId) })
       qc.invalidateQueries({ queryKey: documentKeys.lists() })
     },
   })

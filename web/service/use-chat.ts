@@ -76,9 +76,27 @@ export type RetryOptions = {
   baseDelay?: number
 }
 
+export type ChatStreamResumeOptions = {
+  requestId?: string
+  clientMessageId?: string
+  lastEventId?: string | null
+  resume?: boolean
+}
+
+export type ChatStreamSnapshot = {
+  requestId: string
+  clientMessageId: string
+  conversationId: number | null
+  lastEventId: string | null
+}
+
 export type ChatStreamController = AbortController & {
   /** Resolves when the SSE stream reaches done/error, exhausts retry, or is aborted. */
   completion: Promise<void>
+  requestId: string
+  clientMessageId: string
+  getSnapshot: () => ChatStreamSnapshot
+  detach: () => ChatStreamSnapshot
 }
 
 const DEFAULT_RETRY: Required<RetryOptions> = { maxRetries: 2, baseDelay: 1000 }
@@ -120,6 +138,23 @@ function _generateClientMessageId(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
+function _attachControllerSnapshot(
+  controller: ChatStreamController,
+  state: _RetryState,
+) {
+  controller.getSnapshot = () => ({
+    requestId: state.requestId || controller.requestId,
+    clientMessageId: state.clientMessageId || controller.clientMessageId,
+    conversationId: state.conversationId,
+    lastEventId: state.lastEventId ?? null,
+  })
+  controller.detach = () => {
+    const snapshot = controller.getSnapshot()
+    controller.abort()
+    return snapshot
+  }
+}
+
 /**
  * Send a chat message via SSE streaming (authenticated).
  * Returns an AbortController that can be used to cancel the request.
@@ -129,10 +164,14 @@ export function sendChatMessage(
   message: string,
   conversationId: number | null,
   handlers: ChatEventHandlers,
+  customerContext?: CustomerContext | null,
   retryOpts?: RetryOptions,
   conversationExternalId?: string | null,
+  resumeOptions?: ChatStreamResumeOptions,
 ): ChatStreamController {
   const controller = new AbortController() as ChatStreamController
+  const requestId = resumeOptions?.requestId || _generateRequestId()
+  const clientMessageId = resumeOptions?.clientMessageId || _generateClientMessageId()
 
   const url = `${API_BASE}v1/agents/${agentId}/chat`
   const token = localStorage.getItem('auth_token')
@@ -141,10 +180,10 @@ export function sendChatMessage(
   const state: _RetryState = {
     conversationId,
     conversationExternalId: conversationExternalId ?? null,
-    requestId: _generateRequestId(),
-    clientMessageId: _generateClientMessageId(),
-    isRetry: false,
-    lastEventId: null,
+    requestId,
+    clientMessageId,
+    isRetry: !!resumeOptions?.resume,
+    lastEventId: resumeOptions?.lastEventId ?? null,
     sendStartedAtMs: Date.now(),
     retryCount: 0,
     trackedFirstChunk: false,
@@ -157,6 +196,9 @@ export function sendChatMessage(
     // that real users produce.
     channelToken: null,
   }
+  controller.requestId = requestId
+  controller.clientMessageId = clientMessageId
+  _attachControllerSnapshot(controller, state)
 
   // Telemetry: top-of-turn marker. Carries ``channel_token: null`` so the
   // SDK drops it cleanly — kept in code rather than skipped to make the
@@ -168,7 +210,7 @@ export function sendChatMessage(
     client_message_id: state.clientMessageId,
     props: {
       content_len: message.length,
-      is_resume: false,
+      is_resume: !!resumeOptions?.resume,
       auth: 'bearer',
     },
   })
@@ -195,6 +237,7 @@ export function sendChatMessage(
       // the server. Only sent when we actually have one (no value on the
       // first attempt; on retries it's the most recent `id:` we saw).
       ...(state.lastEventId ? { last_event_id: state.lastEventId } : {}),
+      ...(!state.conversationId && customerContext ? { customer_context: customerContext } : {}),
     }),
     signal: controller.signal,
   })
@@ -218,6 +261,9 @@ export type CustomerContext = {
   external_user_id?: string
   display_name?: string
   source?: string
+  channel_id?: number
+  channel_source?: string
+  is_test?: boolean
 }
 
 export function sendPublicChatMessage(
@@ -229,8 +275,11 @@ export function sendPublicChatMessage(
   customerContext?: CustomerContext | null,
   retryOpts?: RetryOptions,
   conversationExternalId?: string | null,
+  resumeOptions?: ChatStreamResumeOptions,
 ): ChatStreamController {
   const controller = new AbortController() as ChatStreamController
+  const requestId = resumeOptions?.requestId || _generateRequestId()
+  const clientMessageId = resumeOptions?.clientMessageId || _generateClientMessageId()
 
   let url = `${API_BASE}v1/public/channels/${channelToken}/chat`
   if (embedToken) {
@@ -241,10 +290,10 @@ export function sendPublicChatMessage(
   const state: _RetryState = {
     conversationId,
     conversationExternalId: conversationExternalId ?? null,
-    requestId: _generateRequestId(),
-    clientMessageId: _generateClientMessageId(),
-    isRetry: false,
-    lastEventId: null,
+    requestId,
+    clientMessageId,
+    isRetry: !!resumeOptions?.resume,
+    lastEventId: resumeOptions?.lastEventId ?? null,
     sendStartedAtMs: Date.now(),
     retryCount: 0,
     trackedFirstChunk: false,
@@ -257,6 +306,9 @@ export function sendPublicChatMessage(
     // never cross-contaminate each other's tenant_id/agent_id.
     channelToken,
   }
+  controller.requestId = requestId
+  controller.clientMessageId = clientMessageId
+  _attachControllerSnapshot(controller, state)
 
   telemetry.track('message_send_start', {
     channel_token: state.channelToken,
@@ -265,7 +317,7 @@ export function sendPublicChatMessage(
     client_message_id: state.clientMessageId,
     props: {
       content_len: message.length,
-      is_resume: false,
+      is_resume: !!resumeOptions?.resume,
       auth: 'channel_token',
       has_embed_token: !!embedToken,
     },
@@ -301,6 +353,28 @@ export function sendPublicChatMessage(
   )
 
   return controller
+}
+
+export async function cancelPublicChatMessage(
+  channelToken: string,
+  clientMessageId: string,
+): Promise<boolean> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 3000)
+  try {
+    const response = await fetch(`${API_BASE}v1/public/channels/${channelToken}/chat/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_message_id: clientMessageId }),
+      keepalive: true,
+      signal: controller.signal,
+    })
+    return response.ok
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 // ── Internal helpers ──

@@ -1,3 +1,5 @@
+import type { FeedbackRating } from '@/models/feedback'
+
 // Conversation response type (matches ConversationResponse schema)
 export type Conversation = {
   id: number
@@ -5,7 +7,11 @@ export type Conversation = {
   agent_id: number
   external_id: string
   external_user_id: string | null
-  source: 'chat' | 'api' | 'embed'
+  source: string
+  channel_id: number | null
+  channel_name: string | null
+  channel_source: string | null
+  is_test: boolean
   status: 'active' | 'ended'
   title: string | null
   display_name: string | null
@@ -30,7 +36,11 @@ export type ConversationDetail = Conversation & {
 }
 
 // Step types for the execution timeline
-export type StepType = 'user_message' | 'llm_call' | 'tool_call' | 'assistant_message'
+export type StepType =
+  | 'user_message'
+  | 'llm_call'
+  | 'tool_call'
+  | 'assistant_message'
 /**
  * Backend persists `'incomplete'` for partial llm_call rows whose stream was
  * cut off mid-flight (sub-req 2). The public timeline endpoint filters those
@@ -72,9 +82,15 @@ export type StepTimelineItem = {
   // Relationships
   parent_step_id: number | null
 
+  // Visitor feedback (assistant_message only)
+  feedback_rating: FeedbackRating | null
+  feedback_comment: string | null
+  feedback_updated_at: string | null
+
   // Common
   status: StepStatus
   error_message: string | null
+  metadata?: Record<string, unknown> | null
   created_at: string | null
 }
 
@@ -90,6 +106,7 @@ export type ToolCallStepItem = {
   brief: string | null
   status: StepStatus
   error_message: string | null
+  metadata?: Record<string, unknown> | null
   duration_ms: number | null
   created_at: string | null
 }
@@ -111,11 +128,24 @@ export type ConversationTimelineResponse = {
   total_steps: number
 }
 
+export const SOURCE_OPTIONS = [
+  { value: 'websdk', label: 'Web SDK' },
+  { value: 'api', label: 'API' },
+  { value: 'testchat', label: '测试窗口' },
+] as const
+
+export type ConversationSource = (typeof SOURCE_OPTIONS)[number]['value']
+
 // Source label mapping
 export const SOURCE_LABELS: Record<string, string> = {
-  chat: '对话窗口',
+  websdk: 'Web SDK',
   api: 'API',
-  embed: '嵌入式',
+  testchat: '测试窗口',
+}
+
+export function getSourceLabel(source: string | null | undefined): string {
+  if (!source) return '—'
+  return SOURCE_LABELS[source] ?? '—'
 }
 
 // Status label mapping
@@ -225,10 +255,15 @@ export type AssistantResetEvent = {
 export type DoneEvent = {
   assistant_step_id: number | null
   final_content?: string
+  finish_reason?: string
+  code?: string
+  reply?: string
 }
 
 export type ChatErrorEvent = {
   message: string
+  code?: string
+  reply?: string
 }
 
 // ── Chat Message UI Types ──
@@ -273,6 +308,9 @@ export type ChatMessage = {
   toolBlocks: ToolBlock[]
   llmStepId: number | null
   assistantStepId: number | null
+  feedbackRating?: FeedbackRating | null
+  feedbackComment?: string | null
+  feedbackUpdatedAt?: string | null
   /**
    * Surface stream-level failures (network drop, server `event: error`,
    * exhausted retry budget) without overwriting any partial content already

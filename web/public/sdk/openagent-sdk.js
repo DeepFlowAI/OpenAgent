@@ -13,7 +13,7 @@
 (function (root) {
   'use strict';
 
-  var VERSION = '1.0.0';
+  var VERSION = '1.0.2';
   var instances = {};
 
   var DEFAULTS = {
@@ -51,14 +51,43 @@
   }
 
   function getBaseUrl() {
+    var sdkScript = getSdkScript();
+    if (sdkScript) {
+      return (sdkScript.src || '').replace(/\/sdk\/openagent-sdk\.js.*$/, '');
+    }
+    return window.location.origin;
+  }
+
+  function getSdkScript() {
     var scripts = document.getElementsByTagName('script');
     for (var i = scripts.length - 1; i >= 0; i--) {
       var src = scripts[i].src || '';
       if (src.indexOf('openagent-sdk.js') !== -1) {
-        return src.replace(/\/sdk\/openagent-sdk\.js.*$/, '');
+        return scripts[i];
       }
     }
-    return window.location.origin;
+    return null;
+  }
+
+  function getScriptChannelSource() {
+    var sdkScript = getSdkScript();
+    if (!sdkScript || !sdkScript.getAttribute) return null;
+    return sdkScript.getAttribute('data-channel-source');
+  }
+
+  function getStringLength(value) {
+    if (typeof Array.from === 'function') {
+      return Array.from(value).length;
+    }
+    return value.length;
+  }
+
+  function normalizeChannelSource(value) {
+    if (typeof value !== 'string') return '';
+    var normalized = value.replace(/^\s+|\s+$/g, '');
+    if (!normalized || getStringLength(normalized) > 64) return '';
+    if (/[\x00-\x1F\x7F]/.test(normalized)) return '';
+    return normalized;
   }
 
   function getViewportRect() {
@@ -84,9 +113,21 @@
     }
 
     var opts = mergeDeep(DEFAULTS, config);
-    var baseUrl = config.baseUrl || getBaseUrl();
-    var chatUrl = baseUrl + '/chat/' + channelId + '?embed=1';
+    var baseUrl = (config.baseUrl || getBaseUrl()).replace(/\/$/, '');
+    var chatUrlObj = new URL(baseUrl + '/chat/' + channelId, window.location.href);
+    chatUrlObj.searchParams.set('embed', '1');
+    if (config.test === true) {
+      chatUrlObj.searchParams.set('test', 'true');
+    }
+    var channelSource = normalizeChannelSource(
+      config.channelSource != null ? config.channelSource : getScriptChannelSource()
+    );
+    if (channelSource) {
+      chatUrlObj.searchParams.set('channel_source', channelSource);
+    }
+    var chatUrl = chatUrlObj.toString();
     var isOpen = false;
+    var iframeReady = false;
     var destroyed = false;
 
     var callbacks = {
@@ -204,15 +245,36 @@
     var chatWindow = document.createElement('div');
     chatWindow.style.cssText =
       'display:none;border-radius:24px;overflow:hidden;' +
-      'box-shadow:0 8px 32px rgba(0,0,0,0.12);border:1px solid #E4E4E7;';
+      'box-shadow:0 8px 32px rgba(0,0,0,0.12);border:1px solid #E4E4E7;' +
+      'background:#FFFFFF;';
     positionWindow(chatWindow);
 
     var iframe = document.createElement('iframe');
     iframe.src = chatUrl;
-    iframe.style.cssText = 'width:100%;height:100%;border:none;';
+    iframe.style.cssText = 'width:100%;height:100%;border:none;visibility:hidden;';
     iframe.setAttribute('allow', 'clipboard-write');
     chatWindow.appendChild(iframe);
+
+    var loadingOverlay = document.createElement('div');
+    loadingOverlay.style.cssText =
+      'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;' +
+      'background:#FFFFFF;color:#A1A1AA;z-index:1;';
+    loadingOverlay.innerHTML =
+      '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation:openagent-sdk-spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>';
+    chatWindow.appendChild(loadingOverlay);
     container.appendChild(chatWindow);
+
+    if (!document.getElementById('openagent-sdk-style')) {
+      var style = document.createElement('style');
+      style.id = 'openagent-sdk-style';
+      style.textContent = '@keyframes openagent-sdk-spin{to{transform:rotate(360deg)}}';
+      document.head.appendChild(style);
+    }
+
+    function syncLoadingOverlay() {
+      loadingOverlay.style.display = isOpen && !iframeReady ? 'flex' : 'none';
+      iframe.style.visibility = iframeReady ? 'visible' : 'hidden';
+    }
 
     // Listen for close messages from embedded chat page
     function onMessage(e) {
@@ -220,6 +282,9 @@
       var data = e.data;
       if (data && data.type === 'openagent-close') {
         instance.close();
+      } else if (data && data.type === 'openagent-ready') {
+        iframeReady = true;
+        syncLoadingOverlay();
       }
     }
     window.addEventListener('message', onMessage);
@@ -266,10 +331,14 @@
         positionWindow(chatWindow);
         chatWindow.style.display = 'block';
         isOpen = true;
+        syncLoadingOverlay();
         if (launcherBtn) {
           launcherBtn.innerHTML = CLOSE_SVG;
         }
         syncLauncherVisibility();
+        if (iframe.contentWindow) {
+          iframe.contentWindow.postMessage({ type: 'openagent-open' }, '*');
+        }
         if (callbacks.onOpen) callbacks.onOpen();
       },
 
@@ -277,6 +346,7 @@
         if (destroyed || !isOpen) return;
         chatWindow.style.display = 'none';
         isOpen = false;
+        syncLoadingOverlay();
         if (launcherBtn) {
           launcherBtn.innerHTML = MSG_CIRCLE_SVG;
           launcherBtn.style.display = '';

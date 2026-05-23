@@ -4,7 +4,7 @@ Conversation ORM model — stores agent conversation sessions
 import secrets
 import string
 
-from sqlalchemy import String, Text, Integer, ForeignKey, Index, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -32,7 +32,14 @@ class Conversation(Base, TimestampMixin):
         String(64), nullable=False, unique=True, default=generate_conversation_id
     )
     external_user_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    source: Mapped[str] = mapped_column(String(16), nullable=False, default="chat")
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="api")
+    channel_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("channels.id", ondelete="SET NULL"), nullable=True
+    )
+    channel_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_test: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     # Customer context profile fields (§4 unified model)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -65,5 +72,6 @@ class Conversation(Base, TimestampMixin):
         Index("ix_conversations_tenant_agent", "tenant_id", "agent_id"),
         Index("ix_conversations_tenant_started", "tenant_id", "started_at"),
         Index("ix_conversations_status", "status"),
+        Index("ix_conversations_channel_id", "channel_id"),
         UniqueConstraint("external_id", name="uq_conversations_external_id"),
     )

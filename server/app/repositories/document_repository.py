@@ -19,6 +19,20 @@ class DocumentRepository:
         return await db.get(Document, doc_id)
 
     @staticmethod
+    async def get_by_id_for_tenant(
+        db: AsyncSession,
+        doc_id: int,
+        tenant_id: str,
+    ) -> Document | None:
+        result = await db.execute(
+            select(Document).where(
+                Document.id == doc_id,
+                Document.tenant_id == tenant_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
     async def get_by_kb_and_path(
         db: AsyncSession, kb_id: int, file_path: str
     ) -> Document | None:
@@ -108,6 +122,15 @@ class DocumentRepository:
     @staticmethod
     async def delete_by_id(db: AsyncSession, doc_id: int) -> None:
         await db.execute(delete(Document).where(Document.id == doc_id))
+
+    @staticmethod
+    async def count_by_kb(db: AsyncSession, kb_id: int) -> int:
+        result = await db.execute(
+            select(func.count())
+            .select_from(Document)
+            .where(Document.knowledge_base_id == kb_id)
+        )
+        return int(result.scalar_one())
 
     @staticmethod
     async def delete_by_kb_id(db: AsyncSession, kb_id: int) -> int:

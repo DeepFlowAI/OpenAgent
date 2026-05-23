@@ -1,12 +1,22 @@
 """
 ConversationStep service — business logic for conversation execution log
 """
+from datetime import datetime, timezone
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import NotFoundError, ValidationError
+from app.models.channel import Channel
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.conversation_step_repository import ConversationStepRepository
-from app.schemas.conversation_step import StepCreate, StepUpdate
+from app.schemas.conversation_step import StepCreate, StepFeedbackSubmit, StepUpdate
+
+
+def _step_to_response_dict(step) -> dict:
+    return {
+        c.key: getattr(step, "metadata_" if c.key == "metadata" else c.key)
+        for c in step.__table__.columns
+    }
 
 
 class ConversationStepService:
@@ -17,6 +27,12 @@ class ConversationStepService:
     # round commits to ``success`` (or is salvaged as ``incomplete`` after
     # a stream failure), the row reappears in the timeline normally.
     _USER_HIDDEN_STATUSES = frozenset({"pending", "incomplete"})
+
+    @staticmethod
+    def _feedback_enabled(channel: Channel) -> bool:
+        config = channel.config or {}
+        behavior = config.get("behavior")
+        return isinstance(behavior, dict) and behavior.get("feedbackEnabled") is True
 
     @staticmethod
     async def get_timeline(
@@ -70,7 +86,7 @@ class ConversationStepService:
                     db, item.conversation_id, item.round_number,
                 )
             return {
-                **{c.key: getattr(item, c.key) for c in item.__table__.columns},
+                **_step_to_response_dict(item),
                 "tool_call_steps": children,
             }
 
@@ -158,3 +174,51 @@ class ConversationStepService:
                 )
 
         return step
+
+    @staticmethod
+    async def submit_public_feedback(
+        db: AsyncSession,
+        *,
+        channel: Channel,
+        step_id: int,
+        data: StepFeedbackSubmit,
+    ) -> dict:
+        """Submit or overwrite visitor feedback for one assistant reply step."""
+        if not channel.agent_id:
+            raise NotFoundError("Channel has no agent bound")
+        if not ConversationStepService._feedback_enabled(channel):
+            raise ValidationError("Feedback is disabled for this channel")
+
+        step = await ConversationStepRepository.get_by_id(db, step_id)
+        if not step or step.tenant_id != channel.tenant_id:
+            raise NotFoundError("Step not found")
+        if step.step_type != "assistant_message":
+            raise ValidationError("Feedback can only be submitted for assistant messages")
+        if step.status != "success" or not (step.content or "").strip():
+            raise ValidationError("Feedback can only be submitted for completed replies")
+
+        conversation = await ConversationRepository.get_by_id(db, step.conversation_id)
+        if (
+            not conversation
+            or conversation.tenant_id != channel.tenant_id
+            or conversation.agent_id != channel.agent_id
+        ):
+            raise NotFoundError("Step not found")
+
+        comment = data.comment.strip() if data.comment else None
+        if comment == "":
+            comment = None
+
+        updated = await ConversationStepRepository.update_feedback(
+            db,
+            step,
+            rating=data.rating,
+            comment=comment,
+            updated_at=datetime.now(timezone.utc),
+        )
+        return {
+            "step_id": updated.id,
+            "feedback_rating": updated.feedback_rating,
+            "feedback_comment": updated.feedback_comment,
+            "feedback_updated_at": updated.feedback_updated_at,
+        }

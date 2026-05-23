@@ -1,11 +1,21 @@
 """
 AgentTool repository
 """
+from copy import deepcopy
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent_tool import AgentTool
-from app.schemas.agent_tool import DOC_GREP_PARAMETERS_SCHEMA
+from app.schemas.agent_tool import (
+    DEFAULT_HUMAN_HANDOFF_CONFIG,
+    DOC_GREP_PARAMETERS_SCHEMA,
+    HUMAN_HANDOFF_PARAMETERS_SCHEMA,
+    HUMAN_HANDOFF_TOOL_NAME,
+    HUMAN_HANDOFF_TOOL_TYPE,
+    NOTEBOOK_PARAMETERS_SCHEMA,
+    build_human_handoff_parameters_schema,
+)
 
 
 def _system_tool_data(agent_id: int, tenant_id: str) -> list[dict]:
@@ -19,33 +29,7 @@ def _system_tool_data(agent_id: int, tenant_id: str) -> list[dict]:
             "description": "Manage a notebook to collect and organize important information during the conversation.",
             "is_system": True,
             "is_enabled": True,
-            "parameters_schema": {
-                "type": "object",
-                "properties": {
-                    "brief": {
-                        "type": "string",
-                        "description": "One-line summary for session log display",
-                    },
-                    "action": {
-                        "type": "string",
-                        "enum": ["add", "remove"],
-                        "description": "Operation type: add or remove items",
-                    },
-                    "items": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "slice_id": {"type": "string"},
-                                "doc_id": {"type": "string"},
-                                "text": {"type": "string"},
-                                "id": {"type": "string"},
-                            },
-                        },
-                    },
-                },
-                "required": ["brief", "action", "items"],
-            },
+            "parameters_schema": NOTEBOOK_PARAMETERS_SCHEMA,
             "config": {},
         },
         {
@@ -86,6 +70,21 @@ def _system_tool_data(agent_id: int, tenant_id: str) -> list[dict]:
             "is_enabled": True,
             "parameters_schema": DOC_GREP_PARAMETERS_SCHEMA,
             "config": {},
+        },
+        {
+            "agent_id": agent_id,
+            "tenant_id": tenant_id,
+            "tool_type": HUMAN_HANDOFF_TOOL_TYPE,
+            "name": HUMAN_HANDOFF_TOOL_NAME,
+            "description": (
+                "Request human support when the user explicitly asks for a person, "
+                "the issue requires manual handling, or automated assistance cannot safely continue. "
+                "After recording the request, tell the user it has been logged and do not claim a human joined the chat."
+            ),
+            "is_system": True,
+            "is_enabled": False,
+            "parameters_schema": HUMAN_HANDOFF_PARAMETERS_SCHEMA,
+            "config": deepcopy(DEFAULT_HUMAN_HANDOFF_CONFIG),
         },
     ]
 
@@ -169,14 +168,37 @@ class AgentToolRepository:
         db: AsyncSession, agent_id: int, tenant_id: str
     ) -> list[AgentTool]:
         """Create any missing system tools without duplicating existing ones."""
+        system_data = _system_tool_data(agent_id, tenant_id)
+        canonical_by_name = {data["name"]: data for data in system_data}
         existing = await AgentToolRepository.get_by_agent_id(db, agent_id)
+        changed = False
+        for tool in existing:
+            canonical = canonical_by_name.get(tool.name)
+            if not tool.is_system or not canonical:
+                continue
+            if canonical["tool_type"] == HUMAN_HANDOFF_TOOL_TYPE:
+                if tool.tool_type != HUMAN_HANDOFF_TOOL_TYPE:
+                    tool.tool_type = HUMAN_HANDOFF_TOOL_TYPE
+                    changed = True
+                if not tool.parameters_schema:
+                    tool.parameters_schema = build_human_handoff_parameters_schema(
+                        tool.config or {}
+                    )
+                    changed = True
+                continue
+            for key in ("description", "parameters_schema", "tool_type"):
+                value = canonical[key]
+                if getattr(tool, key) != value:
+                    setattr(tool, key, value)
+                    changed = True
+
         existing_system_names = {tool.name for tool in existing if tool.is_system}
         missing = [
             data
-            for data in _system_tool_data(agent_id, tenant_id)
+            for data in system_data
             if data["name"] not in existing_system_names
         ]
-        if not missing:
+        if not missing and not changed:
             return []
 
         tools = []

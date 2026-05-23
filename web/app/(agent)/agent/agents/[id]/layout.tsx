@@ -1,16 +1,18 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import Link from 'next/link'
 import { useParams, usePathname } from 'next/navigation'
 import { cn } from '@/utils/classnames'
 import { useAgent } from '@/service/use-agent'
+import { normalizeConversationSettings } from '@/utils/welcome-message'
 import {
   IconChevronLeft,
   IconCpu,
   IconTool,
   IconMessages,
+  IconChartBar,
 } from '@tabler/icons-react'
 import { ChatTestFab } from '@/app/components/features/chat-test-fab'
 import { ChatTestDrawer } from '@/app/components/features/chat-test-drawer'
@@ -31,12 +33,18 @@ const secondNavItems = [
     segment: 'conversations',
     icon: IconMessages,
   },
+  {
+    label: '会话报表',
+    segment: 'conversation-report',
+    icon: IconChartBar,
+  },
 ]
 
 const thirdNavItems = [
   { label: '基础设定', path: 'engine/basic' },
   { label: '预召回', path: 'engine/pre-recall' },
   { label: '消息预处理', path: 'engine/preprocessing' },
+  { label: '对话设置', path: 'engine/conversation-settings' },
 ]
 
 export default function AgentDetailLayout({ children }: { children: ReactNode }) {
@@ -47,6 +55,10 @@ export default function AgentDetailLayout({ children }: { children: ReactNode })
 
   const { data: agent } = useAgent(Number(agentId))
   const [chatOpen, setChatOpen] = useState(false)
+  const conversationSettings = useMemo(
+    () => normalizeConversationSettings(agent?.engine_config?.conversation_settings),
+    [agent],
+  )
 
   const activeSecondNav = secondNavItems.find((item) =>
     pathname.includes(`/${item.segment}`)
@@ -127,6 +139,7 @@ export default function AgentDetailLayout({ children }: { children: ReactNode })
         open={chatOpen}
         onClose={() => setChatOpen(false)}
         agentId={Number(agentId)}
+        conversationSettings={conversationSettings}
       />
     </div>
   )

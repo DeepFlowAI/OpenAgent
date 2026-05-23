@@ -9,6 +9,7 @@ from app.services.tool_executors.doc_query_executor import DocQueryToolExecutor
 from app.services.tool_executors.doc_grep_executor import DocGrepToolExecutor
 from app.services.tool_executors.notebook_executor import NotebookToolExecutor
 from app.services.tool_executors.fetch_executor import ToolResponseFetchExecutor
+from app.services.tool_executors.human_handoff_executor import HumanHandoffToolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ _EXECUTORS: dict[str, BaseToolExecutor] = {
     "doc_grep": DocGrepToolExecutor(),
     "notebook": NotebookToolExecutor(),
     "tool_response_fetch": ToolResponseFetchExecutor(),
+    "human_handoff": HumanHandoffToolExecutor(),
 }
 
 

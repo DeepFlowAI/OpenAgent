@@ -42,14 +42,12 @@ async def _fetch_response_by_id(
     conversation_id: int,
     tool_response_id: str,
 ) -> str | None:
-    """Look up the tool_response column from conversation_steps
-    where step_type='tool' and metadata contains the matching tool_response_id.
-    """
+    """Look up the archived tool_response for this conversation."""
     result = await db.execute(
         select(ConversationStep.tool_response)
         .where(
             ConversationStep.conversation_id == conversation_id,
-            ConversationStep.step_type == "tool",
+            ConversationStep.step_type == "tool_call",
             ConversationStep.metadata_["tool_response_id"].astext == tool_response_id,
         )
         .order_by(ConversationStep.step_order.desc())

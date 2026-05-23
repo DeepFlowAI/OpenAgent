@@ -1,3 +1,8 @@
+export type LlmModelOption = {
+  value: string
+  label: string
+}
+
 export type SystemEdition = 'community' | 'enterprise'
 
 export type SystemInfo = {
@@ -9,4 +14,6 @@ export type SystemInfo = {
   single_tenant_mode: boolean
   /** Tenant slug to auto-fill when single_tenant_mode is true. */
   default_tenant_id: string
+  /** Agent engine model dropdown options (env-driven on the server). */
+  llm_models: LlmModelOption[]
 }

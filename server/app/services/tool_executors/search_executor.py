@@ -240,6 +240,12 @@ async def _load_subject_context(ctx: ToolContext) -> dict | None:
         subject["display_name"] = conv.display_name
     if conv.email:
         subject["email"] = conv.email
+    if conv.source:
+        subject["source"] = conv.source
+    if conv.channel_id:
+        subject["channel_id"] = conv.channel_id
+    if conv.channel_source:
+        subject["channel_source"] = conv.channel_source
 
     # metadata is the key namespace for permission rule user conditions
     metadata = conv.metadata_ if hasattr(conv, "metadata_") else {}

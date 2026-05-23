@@ -14,6 +14,7 @@ class ToolContext:
     conversation_id: int
     tenant_id: str
     agent_id: int
+    conversation_source: str = "api"
 
 
 class BaseToolExecutor(ABC):

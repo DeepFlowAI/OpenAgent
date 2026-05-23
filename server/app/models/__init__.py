@@ -5,6 +5,7 @@ from app.models.document import Document  # noqa: F401
 from app.models.slice import Slice  # noqa: F401
 from app.models.sync_log import SyncLog  # noqa: F401
 from app.models.agent import Agent  # noqa: F401
+from app.models.agent_message_preprocessing_rule import AgentMessagePreprocessingRule  # noqa: F401
 from app.models.agent_tool import AgentTool  # noqa: F401
 from app.models.super_admin import SuperAdmin  # noqa: F401
 from app.models.api_key import ApiKey  # noqa: F401
@@ -14,3 +15,4 @@ from app.models.channel import Channel  # noqa: F401
 from app.models.kb_permission_rule import KbPermissionRule  # noqa: F401
 from app.models.help_center import HelpCenter  # noqa: F401
 from app.models.help_center_tab import HelpCenterTab  # noqa: F401
+from app.models.service_hours import ServiceHours  # noqa: F401

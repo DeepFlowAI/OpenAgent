@@ -8,6 +8,7 @@ Provide a real GitHub repo + PAT via env vars to exercise authenticated paths:
 Tests that require auth will be skipped automatically when GIT_TOKEN_FOR_TESTS
 is unset, so the suite still passes in CI without secrets.
 """
+import asyncio
 import os
 import time
 import pytest
@@ -51,9 +52,30 @@ class TestSyncAPI:
         sync_resp = await client.post(f"/api/v1/knowledge-bases/{kb_id}/sync")
         assert sync_resp.status_code == 200
         data = sync_resp.json()
-        assert data["status"] in ("success", "partial_success")
-        assert data["total_files"] >= 0
-        assert data["success_count"] >= 0
+        assert data["status"] == "running"
+        assert data["sync_log_id"] > 0
+
+        terminal_status = None
+        for _ in range(90):
+            await asyncio.sleep(2)
+            logs_resp = await client.get(
+                f"/api/v1/knowledge-bases/{kb_id}/sync-logs",
+            )
+            assert logs_resp.status_code == 200
+            items = logs_resp.json()["items"]
+            target = next(
+                (log for log in items if log["id"] == data["sync_log_id"]),
+                None,
+            )
+            if target and target["status"] in (
+                "success", "partial_success", "failed",
+            ):
+                terminal_status = target["status"]
+                break
+
+        assert terminal_status in ("success", "partial_success")
+        assert target["total_files"] is not None and target["total_files"] >= 0
+        assert target["success_count"] is not None and target["success_count"] >= 0
 
     @pytest.mark.asyncio
     async def test_sync_nonexistent_kb_returns_404(self, client: AsyncClient):

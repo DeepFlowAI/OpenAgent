@@ -126,6 +126,21 @@ ENDPOINTS: tuple[EndpointDoc, ...] = (
         example="python -m app.openapi_cli knowledge documents 1 --page 1 --per-page 20",
     ),
     EndpointDoc(
+        key="documents.query",
+        method="POST",
+        path="/api/v1/documents/query",
+        scope="chat",
+        summary="Resolve a document reference by doc_id with optional slice_id and line.",
+        body_fields=[
+            _param("doc_id", "integer", True, "Document ID, positive integer."),
+            _param("slice_id", "integer", False, "Optional slice ID, must belong to doc_id when provided."),
+            _param("line", "integer", False, "Optional Markdown source line number, starting at 1."),
+        ],
+        response="Resolved document fields with optional slice and line details.",
+        errors=["401 missing or invalid API key", "403 scope missing", "422 validation error"],
+        example="python -m app.openapi_cli knowledge query-document 6670 --slice-id 512208 --line 1720",
+    ),
+    EndpointDoc(
         key="conversations.create",
         method="POST",
         path="/api/v1/agents/{agent_id}/conversations",
@@ -135,7 +150,7 @@ ENDPOINTS: tuple[EndpointDoc, ...] = (
         body_fields=[
             _param("agent_id", "integer", True, "Agent ID. The CLI fills this from the path when omitted."),
             _param("external_user_id", "string", False, "External user ID, max 128 chars."),
-            _param("source", "string", False, "chat, api, or embed. Defaults to api in the CLI."),
+            _param("source", "string", False, "websdk, api, or testchat. Defaults to api in the CLI."),
             _param("title", "string", False, "Conversation title."),
             _param("display_name", "string", False, "Customer display name."),
             _param("email", "string", False, "Customer email."),
@@ -160,7 +175,7 @@ ENDPOINTS: tuple[EndpointDoc, ...] = (
             _param("start_time", "string", False, "Start time filter."),
             _param("end_time", "string", False, "End time filter."),
             _param("status_filter", "string", False, "Conversation status."),
-            _param("source", "string", False, "chat, api, or embed."),
+            _param("source", "string", False, "websdk, api, or testchat; comma-separated values are OR filters."),
             _param("conversation_id", "string", False, "Conversation external ID filter."),
             _param("external_user_id", "string", False, "External user ID filter."),
             _param("search", "string", False, "Keyword search."),
@@ -712,6 +727,16 @@ def handle_knowledge(args: argparse.Namespace) -> int:
             {"kb_id": args.kb_id},
             query={"page": args.page, "per_page": args.per_page},
         )
+    if args.knowledge_action == "query-document":
+        return run_request(
+            args,
+            "documents.query",
+            body={
+                "doc_id": args.doc_id,
+                "slice_id": args.slice_id,
+                "line": args.line,
+            },
+        )
     return run_request(args, "knowledge.markdown", {"kb_id": args.kb_id, "doc_id": args.doc_id})
 
 
@@ -898,6 +923,10 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_documents.add_argument("kb_id", type=int)
     knowledge_documents.add_argument("--page", type=int)
     knowledge_documents.add_argument("--per-page", type=int)
+    knowledge_query_document = knowledge_sub.add_parser("query-document")
+    knowledge_query_document.add_argument("doc_id", type=int)
+    knowledge_query_document.add_argument("--slice-id", type=int)
+    knowledge_query_document.add_argument("--line", type=int)
     knowledge_markdown = knowledge_sub.add_parser("markdown")
     knowledge_markdown.add_argument("kb_id", type=int)
     knowledge_markdown.add_argument("doc_id", type=int)
@@ -907,7 +936,7 @@ def build_parser() -> argparse.ArgumentParser:
     conv_sub = conversations.add_subparsers(dest="conversation_action", required=True)
     conv_create = conv_sub.add_parser("create")
     conv_create.add_argument("agent_id", type=int)
-    conv_create.add_argument("--source", default="api", choices=["chat", "api", "embed"])
+    conv_create.add_argument("--source", default="api", choices=["websdk", "api", "testchat"])
     conv_create.add_argument("--title")
     conv_create.add_argument("--external-user-id")
     conv_create.add_argument("--display-name")
@@ -922,7 +951,7 @@ def build_parser() -> argparse.ArgumentParser:
     conv_list.add_argument("--start-time")
     conv_list.add_argument("--end-time")
     conv_list.add_argument("--status-filter")
-    conv_list.add_argument("--source", choices=["chat", "api", "embed"])
+    conv_list.add_argument("--source")
     conv_list.add_argument("--conversation-external-id")
     conv_list.add_argument("--external-user-id")
     conv_list.add_argument("--search")

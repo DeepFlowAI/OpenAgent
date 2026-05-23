@@ -101,6 +101,9 @@ class SubjectContext(BaseModel):
     external_user_id: str | None = None
     display_name: str | None = None
     email: str | None = None
+    source: str | None = None
+    channel_id: int | str | None = None
+    channel_source: str | None = None
     metadata: dict[str, Any] | None = None
 
 

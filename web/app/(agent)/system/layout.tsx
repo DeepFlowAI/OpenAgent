@@ -4,7 +4,7 @@ import type { ReactNode } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/utils/classnames'
-import { IconKey, IconBroadcast, IconBook2 } from '@tabler/icons-react'
+import { IconKey, IconBroadcast, IconBook2, IconCalendarClock } from '@tabler/icons-react'
 
 const secondNavItems = [
   {
@@ -16,6 +16,11 @@ const secondNavItems = [
     label: '渠道',
     href: '/system/channels',
     icon: IconBroadcast,
+  },
+  {
+    label: '服务时间',
+    href: '/system/service-hours',
+    icon: IconCalendarClock,
   },
   {
     label: '帮助中心',

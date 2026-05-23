@@ -1,9 +1,13 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import dynamic from 'next/dynamic'
 import { cn } from '@/utils/classnames'
-import { stripMarkdownHeadingAnchorsRehypeRewrite } from '@/utils/strip-markdown-heading-anchors'
+import {
+  createMarkdownLinkRehypeRewrite,
+  stripMarkdownHeadingAnchorsRehypeRewrite,
+} from '@/utils/strip-markdown-heading-anchors'
+import { getSamePageNavigationLinkProps } from '@/utils/same-page-navigation-allowlist'
 import {
   IconChevronDown,
   IconChevronRight,
@@ -12,10 +16,79 @@ import {
   IconLoader2,
 } from '@tabler/icons-react'
 import type { ThinkingBlock, ContentBlock, ToolBlock } from '@/models/conversation'
+import type { PluggableList } from 'unified'
 
 const MarkdownPreview = dynamic(() => import('@uiw/react-markdown-preview'), {
   ssr: false,
 })
+
+const SAFE_MARKDOWN_TAGS = new Set([
+  'a',
+  'blockquote',
+  'br',
+  'code',
+  'del',
+  'em',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'hr',
+  'img',
+  'li',
+  'ol',
+  'p',
+  'pre',
+  'strong',
+  'table',
+  'tbody',
+  'td',
+  'th',
+  'thead',
+  'tr',
+  'ul',
+])
+
+function safeMarkdownUrlTransform(url: string) {
+  const trimmed = url.trim()
+  if (!trimmed) return ''
+  if (
+    trimmed.startsWith('#') ||
+    trimmed.startsWith('/') ||
+    trimmed.startsWith('./') ||
+    trimmed.startsWith('../')
+  ) {
+    return trimmed
+  }
+
+  try {
+    const parsed = new URL(trimmed)
+    return ['http:', 'https:', 'mailto:', 'tel:'].includes(parsed.protocol)
+      ? trimmed
+      : ''
+  } catch {
+    return ''
+  }
+}
+
+function safeMarkdownAllowElement(element: { tagName?: string }) {
+  const tagName = element.tagName?.toLowerCase()
+  return Boolean(tagName && SAFE_MARKDOWN_TAGS.has(tagName))
+}
+
+function safeMarkdownPluginsFilter(
+  type: 'remark' | 'rehype',
+  plugins: PluggableList,
+): PluggableList {
+  if (type !== 'rehype') return plugins
+  return plugins.filter((plugin) => {
+    const pluginFn = Array.isArray(plugin) ? plugin[0] : plugin
+    const name = typeof pluginFn === 'function' ? pluginFn.name : ''
+    return name !== 'rehypeAttrs' && name !== 'rehypeRaw'
+  }) as PluggableList
+}
 
 // ── Typewriter hook ──────────────────────────────────────
 // Buffers incoming text and reveals it progressively at ~30fps (33ms aligns
@@ -205,7 +278,13 @@ function StreamingCursor({ active }: { active: boolean }) {
   )
 }
 
-export function InlineContentUI({ block }: { block: ContentBlock }) {
+export function InlineContentUI({
+  block,
+  samePageNavigationUrlAllowlist,
+}: {
+  block: ContentBlock
+  samePageNavigationUrlAllowlist?: readonly string[]
+}) {
   const displayText = useTypewriter(block.content, block.isStreaming)
   const hasText = Boolean(block.content.trim())
   if (!hasText && !block.isStreaming) return null
@@ -220,7 +299,17 @@ export function InlineContentUI({ block }: { block: ContentBlock }) {
           <MarkdownPreview
             source={displayText}
             style={{ background: 'transparent', fontSize: 14 }}
-            rehypeRewrite={stripMarkdownHeadingAnchorsRehypeRewrite}
+            skipHtml
+            allowElement={safeMarkdownAllowElement}
+            pluginsFilter={safeMarkdownPluginsFilter}
+            urlTransform={safeMarkdownUrlTransform}
+            rehypeRewrite={
+              samePageNavigationUrlAllowlist?.length
+                ? createMarkdownLinkRehypeRewrite((href) =>
+                    getSamePageNavigationLinkProps(href, samePageNavigationUrlAllowlist)
+                  )
+                : stripMarkdownHeadingAnchorsRehypeRewrite
+            }
           />
           <StreamingCursor active={block.isStreaming} />
         </div>
@@ -234,17 +323,32 @@ export function InlineContentUI({ block }: { block: ContentBlock }) {
 export function MarkdownContent({
   source,
   style,
+  samePageNavigationUrlAllowlist,
 }: {
   source: string
   style?: React.CSSProperties
+  samePageNavigationUrlAllowlist?: readonly string[]
 }) {
+  const rehypeRewrite = useMemo(() => {
+    if (!samePageNavigationUrlAllowlist?.length) {
+      return stripMarkdownHeadingAnchorsRehypeRewrite
+    }
+    return createMarkdownLinkRehypeRewrite((href) =>
+      getSamePageNavigationLinkProps(href, samePageNavigationUrlAllowlist)
+    )
+  }, [samePageNavigationUrlAllowlist])
+
   return (
     // leading-[26px] matches chat user bubble; avoid leading-relaxed stacking with @uiw .wmde-markdown { line-height: 1.5 }
     <div className="text-sm leading-[26px]" data-color-mode="light">
       <MarkdownPreview
         source={source}
         style={{ background: 'transparent', fontSize: 14, ...style }}
-        rehypeRewrite={stripMarkdownHeadingAnchorsRehypeRewrite}
+        skipHtml
+        allowElement={safeMarkdownAllowElement}
+        pluginsFilter={safeMarkdownPluginsFilter}
+        urlTransform={safeMarkdownUrlTransform}
+        rehypeRewrite={rehypeRewrite}
       />
     </div>
   )
@@ -255,15 +359,21 @@ export function StreamingMarkdownContent({
   source,
   isStreaming,
   style,
+  samePageNavigationUrlAllowlist,
 }: {
   source: string
   isStreaming: boolean
   style?: React.CSSProperties
+  samePageNavigationUrlAllowlist?: readonly string[]
 }) {
   const displayText = useTypewriter(source, isStreaming)
   return (
     <div>
-      <MarkdownContent source={displayText} style={style} />
+      <MarkdownContent
+        source={displayText}
+        style={style}
+        samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
+      />
       <StreamingCursor active={isStreaming} />
     </div>
   )

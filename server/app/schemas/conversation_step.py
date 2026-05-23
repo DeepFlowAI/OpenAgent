@@ -4,7 +4,7 @@ ConversationStep Pydantic schemas — timeline, detail, and write schemas
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 # ── Timeline (lightweight, for log page left panel) ──
@@ -44,12 +44,21 @@ class StepTimelineItem(BaseModel):
     # Relationships
     parent_step_id: int | None = None
 
+    # Visitor feedback (assistant_message only)
+    feedback_rating: str | None = None
+    feedback_comment: str | None = None
+    feedback_updated_at: datetime | None = None
+
     # Sub-req 3: client-supplied idempotency key (carried by user_message only).
     client_message_id: str | None = None
 
     # Common
     status: str = "success"
     error_message: str | None = None
+    metadata: dict | None = Field(
+        default=None,
+        validation_alias=AliasChoices("metadata_", "metadata"),
+    )
     created_at: datetime | None = None
 
 
@@ -118,6 +127,11 @@ class StepDetailResponse(BaseModel):
     # Relationships
     parent_step_id: int | None = None
 
+    # Visitor feedback (assistant_message only)
+    feedback_rating: str | None = None
+    feedback_comment: str | None = None
+    feedback_updated_at: datetime | None = None
+
     # Sub-req 3: client-supplied idempotency key (carried by user_message only).
     client_message_id: str | None = None
 
@@ -127,6 +141,10 @@ class StepDetailResponse(BaseModel):
     # Common
     status: str = "success"
     error_message: str | None = None
+    metadata: dict | None = Field(
+        default=None,
+        validation_alias=AliasChoices("metadata_", "metadata"),
+    )
     created_at: datetime | None = None
 
 
@@ -135,7 +153,7 @@ class StepDetailResponse(BaseModel):
 class StepCreate(BaseModel):
     """Create a new step in a conversation"""
     round_number: int = Field(..., ge=1)
-    step_type: str = Field(..., pattern=r"^(user_message|llm_call|tool_call|assistant_message)$")
+    step_type: str = Field(..., pattern=r"^(user_message|llm_call|tool_call|assistant_message|human_handoff_event)$")
     content: str | None = None
 
     # LLM call fields
@@ -193,3 +211,17 @@ class StepUpdate(BaseModel):
     brief: str | None = None
     status: str | None = Field(None, pattern=r"^(pending|running|success|error|incomplete)$")
     error_message: str | None = None
+
+
+class StepFeedbackSubmit(BaseModel):
+    """Visitor feedback payload for one assistant_message step."""
+    rating: str = Field(..., pattern=r"^(like|dislike)$")
+    comment: str | None = Field(None, max_length=500)
+
+
+class StepFeedbackResponse(BaseModel):
+    """Latest feedback for one assistant_message step."""
+    step_id: int
+    feedback_rating: str
+    feedback_comment: str | None = None
+    feedback_updated_at: datetime

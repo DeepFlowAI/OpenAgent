@@ -21,6 +21,7 @@ class TestOpenApiCliCatalog:
 
         assert len(keys) == len(set(keys))
         assert "knowledge.list" in keys
+        assert "documents.query" in keys
         assert "chat.stream" in keys
         assert "agents.list" in keys
         assert "channels.secret_key" in keys

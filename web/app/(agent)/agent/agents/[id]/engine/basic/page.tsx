@@ -1,33 +1,161 @@
 'use client'
 
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
+import {
+  useState,
+  useEffect,
+  useMemo,
+  useCallback,
+  useRef,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react'
 import { useParams } from 'next/navigation'
 import { useAgent, useUpdateEngineConfig } from '@/service/use-agent'
+import { useSystemInfo } from '@/service/use-system'
 import { useAgentTools } from '@/service/use-agent-tool'
 import { useToast } from '@/app/components/base/toast'
 import { getErrorMessage } from '@/service/base'
 import { Switch } from '@/app/components/base/switch'
-import { IconChevronDown, IconX, IconCheck } from '@tabler/icons-react'
+import { Button } from '@/app/components/base/button'
+import { Modal } from '@/app/components/base/modal'
+import { IconBraces, IconChevronDown, IconCopy, IconX, IconCheck } from '@tabler/icons-react'
 import { cn } from '@/utils/classnames'
 import type { EngineConfig } from '@/models/agent'
 import { DEFAULT_ENGINE_CONFIG } from '@/models/agent'
 
-const AVAILABLE_MODELS = [
+const FALLBACK_LLM_MODELS = [
   { value: 'gpt-4o', label: 'GPT-4o' },
-  { value: 'kimi-k2.5', label: 'Kimi K2.5' },
-  { value: 'kimi-k2.6', label: 'Kimi K2.6' },
-  { value: 'glm-5', label: 'GLM-5' },
-  { value: 'glm-5.1', label: 'GLM-5.1' },
-  { value: 'ling-2.6-flash', label: 'Ling 2.6 Flash' },
-  { value: 'mimo-v2.5-pro', label: 'MiMo V2.5 Pro' },
-  { value: 'minimax-m2.5', label: 'MiniMax M2.5' },
-  { value: 'minimax-m2.7', label: 'MiniMax M2.7' },
-  { value: 'step-3.5-flash', label: 'Step 3.5 Flash' },
-  { value: 'grok-4.20', label: 'Grok 4.20' },
-  { value: 'grok-4.20-multi-agent', label: 'Grok 4.20 (Multi-Agent)' },
+] as const
+
+type BasicEngineConfig = Pick<
+  EngineConfig,
+  'system_prompt' | 'model' | 'selected_tool_ids' | 'context'
+>
+
+const DEFAULT_BASIC_CONFIG: BasicEngineConfig = {
+  system_prompt: DEFAULT_ENGINE_CONFIG.system_prompt,
+  model: DEFAULT_ENGINE_CONFIG.model,
+  selected_tool_ids: DEFAULT_ENGINE_CONFIG.selected_tool_ids,
+  context: DEFAULT_ENGINE_CONFIG.context,
+}
+
+type PromptVariable = {
+  code: string
+  description: string
+  condition?: string
+  example?: string
+}
+
+const DATE_TIME_VARIABLES: PromptVariable[] = [
+  {
+    code: '{{current_date}}',
+    description: '当前日期，格式 YYYY-MM-DD',
+    example: '2026-05-17',
+  },
+  {
+    code: '{{current_weekday}}',
+    description: '当前星期，中文星期一至星期日',
+    example: '星期日',
+  },
+  {
+    code: '{{current_time}}',
+    description: '当前时间，格式 HH:MM',
+    example: '14:30',
+  },
+  {
+    code: '{{current_datetime}}',
+    description: '当前日期时间，格式 YYYY-MM-DD HH:MM',
+    example: '2026-05-17 14:30',
+  },
 ]
 
-function deepMerge(defaults: EngineConfig, saved: Record<string, unknown>): EngineConfig {
+const PRE_RECALL_VARIABLES: PromptVariable[] = [
+  {
+    code: '{{first_search}}',
+    description: '首轮预召回的格式化检索结果',
+    condition: '当前轮为会话首轮，预召回开启，已选择搜索工具，且检索有结果',
+  },
+]
+
+const NOTEBOOK_VARIABLES: PromptVariable[] = [
+  {
+    code: '{{tool_notebook_output}}',
+    description: '当前会话笔记工具汇总，格式为 <notebook>...</notebook> 结构化文本',
+    condition: '当前 Agent 已选择且启用内置笔记工具，工具 name = notebook、tool_type = notebook',
+  },
+]
+
+const RUNTIME_VARIABLES: PromptVariable[] = [
+  {
+    code: '{{context_max_rounds}}',
+    description: '基础设定中的「对话轮次」M；0 表示历史轮次不按轮数限制',
+    example: '2',
+  },
+  {
+    code: '{{context_history_tool_rounds}}',
+    description: '基础设定中的「历史轮次保留工具信息」N；0 表示已结束历史轮默认不附带工具链',
+    example: '0',
+  },
+  {
+    code: '{{context_recent_full_tool_responses}}',
+    description: '基础设定中的「最近完整工具响应条数」k',
+    example: '4',
+  },
+  {
+    code: '{{conversation_round_number}}',
+    description: '当前用户消息所在会话轮次，1 起算',
+    example: '3',
+  },
+  {
+    code: '{{history_loaded_round_count}}',
+    description: '本次请求实际装入的已结束历史轮数',
+    example: '2',
+  },
+  {
+    code: '{{history_tool_trace_round_count}}',
+    description: '本次请求实际保留工具轨迹的历史轮数',
+    example: '0',
+  },
+  {
+    code: '{{llm_call_index_in_round}}',
+    description: '当前轮内第几次 LLM 调用，1 起算',
+    example: '2',
+  },
+  {
+    code: '{{completed_tool_call_count_in_round}}',
+    description: '当前轮内，在本次 LLM 调用前已经完成的工具调用次数',
+    example: '1',
+  },
+  {
+    code: '{{next_tool_call_index_in_round}}',
+    description: '如果本次 LLM 决定调用工具，第一条工具调用将是当前轮第几次工具调用',
+    example: '2',
+  },
+  {
+    code: '{{max_tool_loop_rounds}}',
+    description: '当前引擎允许的单轮 LLM-工具循环上限',
+    example: '20',
+  },
+  {
+    code: '{{remaining_tool_loop_rounds}}',
+    description: '当前轮内包含本次在内还剩多少次 LLM-工具循环机会',
+    example: '19',
+  },
+]
+
+const FIRST_SEARCH_SNIPPET = `{{#first_search}}
+## 搜索结果
+
+{{.}}
+{{/first_search}}`
+
+const EMPTY_NOTEBOOK_SNIPPET = `<notebook>
+</notebook>`
+
+function mergeBasicConfig(
+  defaults: BasicEngineConfig,
+  saved: Record<string, unknown>,
+): BasicEngineConfig {
   const savedModel = { ...((saved.model ?? {}) as Record<string, unknown>) }
 
   // Backward compat: map legacy thinking_mode to new split fields
@@ -47,7 +175,6 @@ function deepMerge(defaults: EngineConfig, saved: Record<string, unknown>): Engi
     model: { ...defaults.model, ...savedModel } as EngineConfig['model'],
     selected_tool_ids: (saved.selected_tool_ids as number[]) ?? defaults.selected_tool_ids,
     context: { ...defaults.context, ...(saved.context as Record<string, unknown> ?? {}) },
-    pre_recall: { ...defaults.pre_recall, ...(saved.pre_recall as Record<string, unknown> ?? {}) },
   }
 }
 
@@ -58,15 +185,20 @@ export default function BasicSettingsPage() {
 
   const { data: agent, isLoading: agentLoading } = useAgent(agentId)
   const { data: toolsData } = useAgentTools(agentId)
+  const { data: systemInfo } = useSystemInfo()
   const updateMutation = useUpdateEngineConfig()
 
-  const [config, setConfig] = useState<EngineConfig>(DEFAULT_ENGINE_CONFIG)
+  const availableModels =
+    systemInfo?.llm_models?.length ? systemInfo.llm_models : [...FALLBACK_LLM_MODELS]
+
+  const [config, setConfig] = useState<BasicEngineConfig>(DEFAULT_BASIC_CONFIG)
   const [initialized, setInitialized] = useState(false)
+  const [variablesOpen, setVariablesOpen] = useState(false)
 
   useEffect(() => {
     if (agent && !initialized) {
-      const merged = deepMerge(
-        DEFAULT_ENGINE_CONFIG,
+      const merged = mergeBasicConfig(
+        DEFAULT_BASIC_CONFIG,
         (agent.engine_config ?? {}) as Record<string, unknown>,
       )
       setConfig(merged)
@@ -81,8 +213,8 @@ export default function BasicSettingsPage() {
 
   const isDirty = useMemo(() => {
     if (!agent || !initialized) return false
-    const saved = deepMerge(
-      DEFAULT_ENGINE_CONFIG,
+    const saved = mergeBasicConfig(
+      DEFAULT_BASIC_CONFIG,
       (agent.engine_config ?? {}) as Record<string, unknown>,
     )
     return JSON.stringify(config) !== JSON.stringify(saved)
@@ -90,12 +222,35 @@ export default function BasicSettingsPage() {
 
   const handleSave = useCallback(async () => {
     try {
-      await updateMutation.mutateAsync({ id: agentId, data: config })
+      await updateMutation.mutateAsync({
+        id: agentId,
+        data: {
+          system_prompt: config.system_prompt,
+          model: config.model,
+          selected_tool_ids: config.selected_tool_ids,
+          context: config.context,
+        },
+      })
       toast('保存成功', 'success')
     } catch (err) {
       toast(await getErrorMessage(err), 'error')
     }
   }, [agentId, config, updateMutation, toast])
+
+  const handleCopy = useCallback(
+    async (text: string) => {
+      try {
+        if (typeof navigator === 'undefined' || !navigator.clipboard) {
+          throw new Error('Clipboard is unavailable')
+        }
+        await navigator.clipboard.writeText(text)
+        toast('已复制', 'success')
+      } catch {
+        toast('复制失败，请手动复制', 'error')
+      }
+    },
+    [toast],
+  )
 
   const updateModel = useCallback(
     (key: string, value: unknown) => {
@@ -143,11 +298,24 @@ export default function BasicSettingsPage() {
       <div className="flex-1 space-y-8 overflow-auto p-8">
         {/* System Prompt */}
         <section className="space-y-3">
-          <div>
-            <h3 className="text-sm font-semibold text-[#18181B]">提示词 / System Prompt</h3>
-            <p className="mt-1 text-[13px] text-[#71717A]">
-              定义 Agent 的角色、行为规范和能力边界
-            </p>
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h3 className="text-sm font-semibold text-[#18181B]">提示词 / System Prompt</h3>
+              <p className="mt-1 text-[13px] text-[#71717A]">
+                定义 Agent 的角色、行为规范和能力边界
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => setVariablesOpen(true)}
+              disabled={agentLoading}
+              className="shrink-0 gap-1.5"
+            >
+              <IconBraces size={16} />
+              变量
+            </Button>
           </div>
           <textarea
             value={config.system_prompt}
@@ -174,7 +342,7 @@ export default function BasicSettingsPage() {
                 className="w-full rounded-lg border border-[#E4E4E7] px-3 py-2 text-sm text-[#18181B] outline-none focus:border-[#18181B]"
               >
                 <option value="">选择模型</option>
-                {AVAILABLE_MODELS.map((m) => (
+                {availableModels.map((m) => (
                   <option key={m.value} value={m.value}>
                     {m.label}
                   </option>
@@ -337,7 +505,180 @@ export default function BasicSettingsPage() {
           </div>
         </section>
       </div>
+
+      <PromptVariablesModal
+        open={variablesOpen}
+        onClose={() => setVariablesOpen(false)}
+        onCopy={handleCopy}
+      />
     </div>
+  )
+}
+
+function PromptVariablesModal({
+  open,
+  onClose,
+  onCopy,
+}: {
+  open: boolean
+  onClose: () => void
+  onCopy: (text: string) => void
+}) {
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="提示词变量"
+      className="w-[720px] max-w-[calc(100vw-32px)]"
+      footer={
+        <Button type="button" variant="outline" onClick={onClose}>
+          关闭
+        </Button>
+      }
+    >
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        onClick={onClose}
+        title="关闭"
+        aria-label="关闭变量弹窗"
+        className="absolute right-4 top-4 h-8 w-8 text-[#737373]"
+      >
+        <IconX size={18} />
+      </Button>
+
+      <div className="max-h-[68vh] space-y-5 overflow-auto pr-1">
+        <p className="rounded-lg bg-[#F5F5F5] px-3 py-2 text-[13px] leading-relaxed text-[#52525B]">
+          变量会在每次 LLM 调用前替换。未满足条件或未注入的变量会替换为空字符串。
+        </p>
+
+        <VariableSection title="日期时间变量" variables={DATE_TIME_VARIABLES} onCopy={onCopy} />
+
+        <VariableSection title="预召回变量" variables={PRE_RECALL_VARIABLES} onCopy={onCopy}>
+          <SnippetBlock
+            title="推荐条件块"
+            description="块内 {{.}} 表示 first_search 的检索结果；无内容时整块不注入。"
+            content={FIRST_SEARCH_SNIPPET}
+            onCopy={onCopy}
+          />
+        </VariableSection>
+
+        <VariableSection
+          title="运行态变量"
+          description="这些变量在每次 LLM 调用前更新，适合放在 System Prompt 中帮助模型判断是否继续调用工具或收敛回答。"
+          variables={RUNTIME_VARIABLES}
+          onCopy={onCopy}
+        />
+
+        <VariableSection title="笔记工具变量" variables={NOTEBOOK_VARIABLES} onCopy={onCopy}>
+          <SnippetBlock
+            title="空 notebook 示例"
+            description="笔记工具可用但暂无笔记条目时，变量内容为空 notebook 结构。"
+            content={EMPTY_NOTEBOOK_SNIPPET}
+            onCopy={onCopy}
+          />
+        </VariableSection>
+      </div>
+    </Modal>
+  )
+}
+
+function VariableSection({
+  title,
+  description,
+  variables,
+  children,
+  onCopy,
+}: {
+  title: string
+  description?: string
+  variables: PromptVariable[]
+  children?: ReactNode
+  onCopy: (text: string) => void
+}) {
+  return (
+    <section className="space-y-3">
+      <h3 className="text-sm font-semibold text-[#18181B]">{title}</h3>
+      {description && (
+        <p className="text-[13px] leading-relaxed text-[#71717A]">{description}</p>
+      )}
+      <div className="space-y-2">
+        {variables.map((variable) => (
+          <VariableRow key={variable.code} variable={variable} onCopy={onCopy} />
+        ))}
+      </div>
+      {children}
+    </section>
+  )
+}
+
+function VariableRow({
+  variable,
+  onCopy,
+}: {
+  variable: PromptVariable
+  onCopy: (text: string) => void
+}) {
+  return (
+    <div className="rounded-lg border border-[#E5E5E5] bg-white p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 space-y-1">
+          <code className="inline-flex rounded-md bg-[#F4F4F5] px-2 py-1 font-mono text-xs text-[#18181B]">
+            {variable.code}
+          </code>
+          <p className="text-[13px] leading-relaxed text-[#52525B]">{variable.description}</p>
+        </div>
+        <CopyButton label="复制变量" onClick={() => onCopy(variable.code)} />
+      </div>
+      {(variable.example || variable.condition) && (
+        <div className="mt-2 space-y-1 border-t border-[#F4F4F5] pt-2 text-xs text-[#71717A]">
+          {variable.example && <p>示例：{variable.example}</p>}
+          {variable.condition && <p>可用条件：{variable.condition}</p>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SnippetBlock({
+  title,
+  description,
+  content,
+  onCopy,
+}: {
+  title: string
+  description: string
+  content: string
+  onCopy: (text: string) => void
+}) {
+  return (
+    <div className="rounded-lg border border-[#E5E5E5] bg-white p-3">
+      <div className="mb-2 flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[13px] font-medium text-[#18181B]">{title}</p>
+          <p className="mt-0.5 text-xs leading-relaxed text-[#71717A]">{description}</p>
+        </div>
+        <CopyButton label="复制片段" onClick={() => onCopy(content)} />
+      </div>
+      <pre className="overflow-auto rounded-md bg-[#18181B] p-3 font-mono text-xs leading-relaxed text-[#E4E4E7]">{content}</pre>
+    </div>
+  )
+}
+
+function CopyButton({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className="h-8 w-8 shrink-0 text-[#404040]"
+    >
+      <IconCopy size={16} />
+    </Button>
   )
 }
 
@@ -369,7 +710,7 @@ function ToolMultiSelect({
     )
   }
 
-  const remove = (id: number, e: React.MouseEvent) => {
+  const remove = (id: number, e: ReactMouseEvent) => {
     e.stopPropagation()
     onChange(selectedIds.filter((x) => x !== id))
   }

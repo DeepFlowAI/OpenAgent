@@ -92,6 +92,8 @@ export default function ToolManagementPage() {
             tools={systemTools}
             onToggle={handleToggle}
             showDelete={false}
+            canOpen={(tool) => tool.tool_type === 'human_handoff'}
+            onRowClick={(tool) => router.push(`/agent/agents/${agentId}/tools/${tool.id}`)}
           />
         </section>
 
@@ -160,12 +162,14 @@ function ToolTable({
   showDelete,
   onDelete,
   onRowClick,
+  canOpen,
 }: {
   tools: AgentTool[]
   onToggle: (tool: AgentTool, enabled: boolean) => void
   showDelete: boolean
   onDelete?: (tool: AgentTool) => void
   onRowClick?: (tool: AgentTool) => void
+  canOpen?: (tool: AgentTool) => boolean
 }) {
   return (
     <div className="overflow-hidden rounded-lg border border-[#E4E4E7]">
@@ -180,50 +184,55 @@ function ToolTable({
           </tr>
         </thead>
         <tbody>
-          {tools.map((tool) => (
-            <tr
-              key={tool.id}
-              className={`border-b border-[#E4E4E7] last:border-b-0 ${
-                onRowClick ? 'cursor-pointer hover:bg-[#FAFAFA]' : ''
-              }`}
-              onClick={() => onRowClick?.(tool)}
-            >
-              <td className="px-4 py-3 font-medium text-[#18181B]">{tool.name}</td>
-              <td className="px-4 py-3">
-                <ToolTypeBadge type={tool.tool_type} isSystem={tool.is_system} />
-              </td>
-              <td className="max-w-[300px] truncate px-4 py-3 text-[#71717A]">
-                {tool.description || '—'}
-              </td>
-              <td className="px-4 py-3">
-                <span
-                  className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
-                    tool.is_enabled
-                      ? 'bg-green-50 text-green-700'
-                      : 'bg-gray-100 text-gray-500'
-                  }`}
-                >
-                  {tool.is_enabled ? '已启用' : '已禁用'}
-                </span>
-              </td>
-              <td className="px-4 py-3">
-                <div className="flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
-                  <Switch
-                    checked={tool.is_enabled}
-                    onChange={(checked) => onToggle(tool, checked)}
-                  />
-                  {showDelete && onDelete && (
-                    <button
-                      onClick={() => onDelete(tool)}
-                      className="rounded-md p-1.5 text-[#A1A1AA] transition-colors hover:bg-[#F4F4F5] hover:text-[#EF4444]"
-                    >
-                      <IconTrash size={16} />
-                    </button>
-                  )}
-                </div>
-              </td>
-            </tr>
-          ))}
+          {tools.map((tool) => {
+            const clickable = !!onRowClick && (canOpen ? canOpen(tool) : true)
+            return (
+              <tr
+                key={tool.id}
+                className={`border-b border-[#E4E4E7] last:border-b-0 ${
+                  clickable ? 'cursor-pointer hover:bg-[#FAFAFA]' : ''
+                }`}
+                onClick={() => {
+                  if (clickable) onRowClick?.(tool)
+                }}
+              >
+                <td className="px-4 py-3 font-medium text-[#18181B]">{tool.name}</td>
+                <td className="px-4 py-3">
+                  <ToolTypeBadge type={tool.tool_type} isSystem={tool.is_system} />
+                </td>
+                <td className="max-w-[300px] truncate px-4 py-3 text-[#71717A]">
+                  {tool.description || '—'}
+                </td>
+                <td className="px-4 py-3">
+                  <span
+                    className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+                      tool.is_enabled
+                        ? 'bg-green-50 text-green-700'
+                        : 'bg-gray-100 text-gray-500'
+                    }`}
+                  >
+                    {tool.is_enabled ? '已启用' : '已禁用'}
+                  </span>
+                </td>
+                <td className="px-4 py-3">
+                  <div className="flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+                    <Switch
+                      checked={tool.is_enabled}
+                      onChange={(checked) => onToggle(tool, checked)}
+                    />
+                    {showDelete && onDelete && (
+                      <button
+                        onClick={() => onDelete(tool)}
+                        className="rounded-md p-1.5 text-[#A1A1AA] transition-colors hover:bg-[#F4F4F5] hover:text-[#EF4444]"
+                      >
+                        <IconTrash size={16} />
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
@@ -231,7 +240,7 @@ function ToolTable({
 }
 
 function ToolTypeBadge({ type, isSystem }: { type: AgentTool['tool_type']; isSystem: boolean }) {
-  const label = isSystem ? '系统工具' : (TOOL_TYPE_LABELS[type]?.zh ?? type)
+  const label = isSystem && type !== 'human_handoff' ? '系统工具' : (TOOL_TYPE_LABELS[type]?.zh ?? type)
   const colors = isSystem
     ? 'bg-blue-50 text-blue-700'
     : 'bg-purple-50 text-purple-700'

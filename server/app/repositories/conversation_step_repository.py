@@ -1,6 +1,8 @@
 """
 ConversationStep repository — data access for conversation_steps table
 """
+from datetime import datetime
+
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -169,6 +171,22 @@ class ConversationStepRepository:
         for key, value in data.items():
             if hasattr(item, key) and value is not None:
                 setattr(item, key, value)
+        await db.commit()
+        await db.refresh(item)
+        return item
+
+    @staticmethod
+    async def update_feedback(
+        db: AsyncSession,
+        item: ConversationStep,
+        *,
+        rating: str,
+        comment: str | None,
+        updated_at: datetime,
+    ) -> ConversationStep:
+        item.feedback_rating = rating
+        item.feedback_comment = comment
+        item.feedback_updated_at = updated_at
         await db.commit()
         await db.refresh(item)
         return item

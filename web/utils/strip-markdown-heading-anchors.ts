@@ -9,13 +9,19 @@ type HastLikeElement = {
   }>
 }
 
+export type MarkdownLinkPropsResolver = (href: string) => {
+  target?: string
+  rel?: string
+}
+
 /**
  * Strips heading permalink anchors injected by @uiw/react-markdown-preview
  * (rehype-slug + rehype-autolink-headings). Pass as `rehypeRewrite` on MarkdownPreview.
  * Also makes user-facing markdown links open outside the embedded chat iframe.
  */
-export function stripMarkdownHeadingAnchorsRehypeRewrite(
+function rewriteMarkdownLinksAndHeadings(
   node: HastLikeElement | { type: string },
+  resolveLinkProps: MarkdownLinkPropsResolver,
   _index?: number,
   _parent?: unknown,
 ): void {
@@ -27,8 +33,7 @@ export function stripMarkdownHeadingAnchorsRehypeRewrite(
     if (href && !href.startsWith('#')) {
       el.properties = {
         ...el.properties,
-        target: '_blank',
-        rel: 'noopener noreferrer',
+        ...resolveLinkProps(href),
       }
     }
     return
@@ -39,4 +44,27 @@ export function stripMarkdownHeadingAnchorsRehypeRewrite(
   if (child?.type === 'element' && child.tagName === 'a' && child.properties?.ariaHidden === 'true') {
     el.children = el.children!.slice(1)
   }
+}
+
+export function createMarkdownLinkRehypeRewrite(
+  resolveLinkProps: MarkdownLinkPropsResolver,
+) {
+  return (
+    node: HastLikeElement | { type: string },
+    index?: number,
+    parent?: unknown,
+  ): void => rewriteMarkdownLinksAndHeadings(node, resolveLinkProps, index, parent)
+}
+
+export function stripMarkdownHeadingAnchorsRehypeRewrite(
+  node: HastLikeElement | { type: string },
+  index?: number,
+  parent?: unknown,
+): void {
+  rewriteMarkdownLinksAndHeadings(
+    node,
+    () => ({ target: '_blank', rel: 'noopener noreferrer' }),
+    index,
+    parent,
+  )
 }

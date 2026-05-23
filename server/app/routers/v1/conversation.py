@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.deps import get_db, require_scope
 from app.core.exceptions import NotFoundError
+from app.schemas.channel import ChannelOptionListResponse
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationResponse,
@@ -31,6 +32,9 @@ async def list_conversations(
     end_time: datetime | None = None,
     status_filter: str | None = None,
     source: str | None = None,
+    channel_id: str | None = None,
+    channel_source: str | None = None,
+    message_content: str | None = None,
     conversation_id: str | None = None,
     external_user_id: str | None = None,
     search: str | None = None,
@@ -47,6 +51,9 @@ async def list_conversations(
         end_time=end_time,
         status=status_filter,
         source=source,
+        channel_id=channel_id,
+        channel_source=channel_source,
+        message_content=message_content,
         conversation_id=conversation_id,
         external_user_id=external_user_id,
         search=search,
@@ -61,6 +68,9 @@ async def export_conversations(
     end_time: datetime | None = None,
     status_filter: str | None = None,
     source: str | None = None,
+    channel_id: str | None = None,
+    channel_source: str | None = None,
+    message_content: str | None = None,
     conversation_id: str | None = None,
     external_user_id: str | None = None,
     search: str | None = None,
@@ -75,6 +85,9 @@ async def export_conversations(
         end_time=end_time,
         status=status_filter,
         source=source,
+        channel_id=channel_id,
+        channel_source=channel_source,
+        message_content=message_content,
         conversation_id=conversation_id,
         external_user_id=external_user_id,
         search=search,
@@ -86,6 +99,16 @@ async def export_conversations(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.get("/channel-options", response_model=ChannelOptionListResponse)
+async def list_conversation_channel_options(
+    agent_id: int,
+    tenant_id: str = Depends(require_scope("chat")),
+    db: AsyncSession = Depends(get_db),
+):
+    """List Web SDK channel options bound to the current agent."""
+    return await ConversationService.get_channel_options(db, tenant_id, agent_id)
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetailResponse)

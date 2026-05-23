@@ -3,10 +3,11 @@ Conversation repository — data access for conversations table
 """
 from datetime import datetime
 
-from sqlalchemy import select, func
+from sqlalchemy import false, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.conversation import Conversation
+from app.models.conversation_step import ConversationStep
 
 
 class ConversationRepository:
@@ -35,7 +36,10 @@ class ConversationRepository:
         start_time: datetime | None = None,
         end_time: datetime | None = None,
         status: str | None = None,
-        source: str | None = None,
+        source: str | list[str] | None = None,
+        channel_id: list[int] | None = None,
+        channel_source: str | None = None,
+        message_content: str | None = None,
         conversation_id: str | None = None,
         external_user_id: str | None = None,
         search: str | None = None,
@@ -51,8 +55,34 @@ class ConversationRepository:
             conditions.append(Conversation.started_at <= end_time)
         if status:
             conditions.append(Conversation.status == status)
-        if source:
+        if isinstance(source, list):
+            if source:
+                conditions.append(Conversation.source.in_(source))
+            else:
+                conditions.append(false())
+        elif source:
             conditions.append(Conversation.source == source)
+        if channel_id is not None:
+            if channel_id:
+                conditions.append(Conversation.channel_id.in_(channel_id))
+            else:
+                conditions.append(false())
+        if channel_source:
+            conditions.append(Conversation.channel_source == channel_source.strip())
+        if message_content:
+            keyword = message_content.strip()
+            if keyword:
+                conditions.append(
+                    select(ConversationStep.id)
+                    .where(
+                        ConversationStep.conversation_id == Conversation.id,
+                        ConversationStep.step_type.in_(
+                            ["user_message", "assistant_message"]
+                        ),
+                        ConversationStep.content.ilike(f"%{keyword}%"),
+                    )
+                    .exists()
+                )
         if conversation_id:
             conditions.append(Conversation.external_id == conversation_id.strip())
         if external_user_id:

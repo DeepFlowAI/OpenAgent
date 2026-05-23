@@ -7,6 +7,9 @@ import '@/styles/globals.css'
 export const metadata: Metadata = {
   title: 'OpenAgent',
   description: 'OpenAgent Multi-tenant Management Platform',
+  icons: {
+    icon: '/favicon.svg',
+  },
 }
 
 export default function RootLayout({

@@ -64,12 +64,12 @@ def _provider_base_urls() -> dict[str, str]:
 # Compatibility shim: keep the constant name some call-sites import directly.
 PROVIDER_BASE_URLS: dict[str, str] = _provider_base_urls()
 
-# OpenAI-compatible provider model ids. The `openai/` prefix tells LiteLLM to
-# use the OpenAI-compatible adapter while preserving the vendor's model name.
+# Bailian (DashScope compatible-mode) model ids — short UI name -> upstream id.
+# Upstream examples: kimi/kimi-k2.6, ZHIPU/GLM-5.1, MiniMax/MiniMax-M2.7
 BAILIAN_MODEL_MAP: dict[str, str] = {
-    "minimax-m2.7": "openai/MiniMax/MiniMax-M2.7",
     "kimi-k2.6": "openai/kimi/kimi-k2.6",
-    "glm-5.1": "openai/glm-5.1",
+    "glm-5.1": "openai/ZHIPU/GLM-5.1",
+    "minimax-m2.7": "openai/MiniMax/MiniMax-M2.7",
 }
 
 OFFICIAL_MODEL_MAP: dict[str, dict] = {
@@ -264,20 +264,61 @@ def _provider_base(resolved: str) -> dict:
     return {}
 
 
+def _parse_provider_channels(raw: str) -> list[str] | None:
+    """Parse ``LLM_PROVIDER_CHANNELS`` into an ordered allowlist, or None if unset."""
+    text = (raw or "").strip()
+    if not text:
+        return None
+    channels: list[str] = []
+    for part in text.split(","):
+        ch = part.strip()
+        if ch and ch not in channels:
+            channels.append(ch)
+    return channels or None
+
+
+def _bailian_candidate(model: str, *, allow_unmapped: bool = False) -> dict | None:
+    if not settings.ALIYUN_BAILIAN_API_KEY:
+        return None
+    bailian_model = BAILIAN_MODEL_MAP.get(model)
+    if not bailian_model:
+        if not allow_unmapped:
+            return None
+        bailian_model = f"openai/{model}"
+    return {
+        "channel": "aliyun-bailian",
+        "model": bailian_model,
+        "api_key": settings.ALIYUN_BAILIAN_API_KEY,
+        "api_base": settings.ALIYUN_BAILIAN_BASE_URL,
+    }
+
+
+def _filter_candidates_by_channels(
+    candidates: list[dict], allowed: list[str], model: str
+) -> list[dict]:
+    """Keep only allowed channels, preserving the env-configured order."""
+    by_channel: dict[str, dict] = {}
+    for candidate in candidates:
+        by_channel.setdefault(candidate["channel"], candidate)
+
+    filtered: list[dict] = []
+    for channel in allowed:
+        if channel in by_channel:
+            filtered.append(by_channel[channel])
+        elif channel == "aliyun-bailian":
+            extra = _bailian_candidate(model, allow_unmapped=True)
+            if extra:
+                filtered.append(extra)
+    return filtered
+
+
 def _model_candidates(model: str) -> list[dict]:
     """Return provider candidates in priority order for a user-selected model."""
     candidates: list[dict] = []
 
-    bailian_model = BAILIAN_MODEL_MAP.get(model)
-    if bailian_model and settings.ALIYUN_BAILIAN_API_KEY:
-        candidates.append(
-            {
-                "channel": "aliyun-bailian",
-                "model": bailian_model,
-                "api_key": settings.ALIYUN_BAILIAN_API_KEY,
-                "api_base": settings.ALIYUN_BAILIAN_BASE_URL,
-            }
-        )
+    bailian = _bailian_candidate(model)
+    if bailian:
+        candidates.append(bailian)
 
     official = OFFICIAL_MODEL_MAP.get(model)
     if official:
@@ -317,6 +358,10 @@ def _model_candidates(model: str) -> list[dict]:
             **_provider_base(resolved),
         }
     )
+
+    allowed = _parse_provider_channels(settings.LLM_PROVIDER_CHANNELS)
+    if allowed:
+        return _filter_candidates_by_channels(candidates, allowed, model)
     return candidates
 
 

@@ -32,12 +32,19 @@ async def _create_conversation(
     payload = {
         "agent_id": agent_id,
         "user_id": "test_user_001",
-        "source": "chat",
+        "source": "api",
         **overrides,
     }
     resp = await client.post(
         f"/api/v1/agents/{agent_id}/conversations", json=payload, headers=HEADERS
     )
+    assert resp.status_code == 201
+    return resp.json()
+
+
+async def _create_channel(client: AsyncClient, **overrides) -> dict:
+    payload = {"name": unique_name("conv-ch"), **overrides}
+    resp = await client.post("/api/v1/channels", json=payload, headers=HEADERS)
     assert resp.status_code == 201
     return resp.json()
 
@@ -84,16 +91,26 @@ class TestConversationAPI:
         assert data["agent_id"] == agent_id
         assert data["tenant_id"] == TENANT_ID
         assert data["status"] == "active"
-        assert data["source"] == "chat"
+        assert data["source"] == "api"
+        assert data["channel_id"] is None
+        assert data["channel_name"] is None
         assert data["external_id"].startswith("conv_")
         assert data["round_count"] == 0
         assert data["total_tokens"] == 0
 
     @pytest.mark.asyncio
-    async def test_create_conversation_api_source(self, client: AsyncClient):
+    async def test_create_conversation_websdk_channel(self, client: AsyncClient):
         agent_id = await _create_agent(client)
-        data = await _create_conversation(client, agent_id, source="api")
-        assert data["source"] == "api"
+        channel = await _create_channel(client)
+        data = await _create_conversation(
+            client,
+            agent_id,
+            source="websdk",
+            channel_id=channel["id"],
+        )
+        assert data["source"] == "websdk"
+        assert data["channel_id"] == channel["id"]
+        assert data["channel_name"] == channel["name"]
 
     @pytest.mark.asyncio
     async def test_get_conversation_returns_200(self, client: AsyncClient):
@@ -171,6 +188,131 @@ class TestConversationAPI:
             assert item["source"] == "api"
 
     @pytest.mark.asyncio
+    async def test_filter_by_multiple_sources(self, client: AsyncClient):
+        agent_id = await _create_agent(client)
+        await _create_conversation(client, agent_id, source="websdk")
+        await _create_conversation(client, agent_id, source="testchat")
+        await _create_conversation(client, agent_id, source="api")
+
+        resp = await client.get(
+            f"/api/v1/agents/{agent_id}/conversations",
+            params={"source": "websdk,testchat"},
+            headers=HEADERS,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        sources = {item["source"] for item in data["items"]}
+        assert sources <= {"websdk", "testchat"}
+        assert {"websdk", "testchat"} <= sources
+
+    @pytest.mark.asyncio
+    async def test_filter_by_channel_id_and_channel_source(
+        self, client: AsyncClient
+    ):
+        agent_id = await _create_agent(client)
+        channel = await _create_channel(client, agent_id=agent_id)
+        other_channel = await _create_channel(client, agent_id=agent_id)
+        matched = await _create_conversation(
+            client,
+            agent_id,
+            source="websdk",
+            channel_id=channel["id"],
+            channel_source="official_site",
+        )
+        await _create_conversation(
+            client,
+            agent_id,
+            source="websdk",
+            channel_id=other_channel["id"],
+            channel_source="official_site",
+        )
+        await _create_conversation(
+            client,
+            agent_id,
+            source="websdk",
+            channel_id=channel["id"],
+            channel_source="docs_site",
+        )
+
+        resp = await client.get(
+            f"/api/v1/agents/{agent_id}/conversations",
+            params={
+                "channel_id": str(channel["id"]),
+                "channel_source": "official_site",
+            },
+            headers=HEADERS,
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["id"] == matched["id"]
+
+    @pytest.mark.asyncio
+    async def test_filter_by_message_content_limits_to_user_and_assistant(
+        self, client: AsyncClient
+    ):
+        agent_id = await _create_agent(client)
+        user_match = await _create_conversation(client, agent_id)
+        assistant_match = await _create_conversation(client, agent_id)
+        excluded_tool = await _create_conversation(client, agent_id)
+
+        await _create_step(
+            client,
+            agent_id,
+            user_match["id"],
+            step_type="user_message",
+            content="Needle appears in user text",
+        )
+        await _create_step(
+            client,
+            agent_id,
+            assistant_match["id"],
+            step_type="assistant_message",
+            content="Needle appears in assistant text",
+        )
+        await _create_step(
+            client,
+            agent_id,
+            excluded_tool["id"],
+            step_type="tool_call",
+            content="Needle appears in tool content",
+        )
+
+        resp = await client.get(
+            f"/api/v1/agents/{agent_id}/conversations",
+            params={"message_content": "Needle"},
+            headers=HEADERS,
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        ids = {item["id"] for item in data["items"]}
+        assert user_match["id"] in ids
+        assert assistant_match["id"] in ids
+        assert excluded_tool["id"] not in ids
+
+    @pytest.mark.asyncio
+    async def test_channel_options_only_returns_agent_web_sdk_channels(
+        self, client: AsyncClient
+    ):
+        agent_id = await _create_agent(client)
+        other_agent_id = await _create_agent(client)
+        bound = await _create_channel(client, agent_id=agent_id, channel_type="web-sdk")
+        await _create_channel(client, agent_id=other_agent_id, channel_type="web-sdk")
+        await _create_channel(client, agent_id=agent_id, channel_type="wechat")
+        await _create_channel(client, channel_type="web-sdk")
+
+        resp = await client.get(
+            f"/api/v1/agents/{agent_id}/conversations/channel-options",
+            headers=HEADERS,
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["items"] == [{"id": bound["id"], "name": bound["name"]}]
+
+    @pytest.mark.asyncio
     async def test_filter_by_conversation_id(self, client: AsyncClient):
         agent_id = await _create_agent(client)
         created = await _create_conversation(client, agent_id)
@@ -191,8 +333,8 @@ class TestConversationAPI:
         self, client: AsyncClient
     ):
         agent_id = await _create_agent(client)
-        match_1 = await _create_conversation(client, agent_id, source="chat")
-        match_2 = await _create_conversation(client, agent_id, source="chat")
+        match_1 = await _create_conversation(client, agent_id, source="websdk")
+        match_2 = await _create_conversation(client, agent_id, source="websdk")
         excluded = await _create_conversation(client, agent_id, source="api")
 
         await _create_step(
@@ -249,7 +391,7 @@ class TestConversationAPI:
 
         resp = await client.get(
             f"/api/v1/agents/{agent_id}/conversations/export",
-            params={"source": "chat", "page": 1, "per_page": 1},
+            params={"source": "websdk", "page": 1, "per_page": 1},
             headers=HEADERS,
         )
 

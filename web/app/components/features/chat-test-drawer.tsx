@@ -36,11 +36,16 @@ import {
   StreamingThinkingPlaceholder,
 } from '@/app/components/features/chat-message-blocks'
 import type { ChatMessage, ToolBlock } from '@/models/conversation'
+import {
+  DEFAULT_CONVERSATION_SETTINGS,
+  type ConversationSettingsConfig,
+} from '@/models/agent'
 
 type ChatTestDrawerProps = {
   open: boolean
   onClose: () => void
   agentId: number
+  conversationSettings: ConversationSettingsConfig
 }
 
 let msgCounter = 0
@@ -48,7 +53,29 @@ function genId() {
   return `msg_${Date.now()}_${++msgCounter}`
 }
 
-export function ChatTestDrawer({ open, onClose, agentId }: ChatTestDrawerProps) {
+function isToolCallLimitError(data: { code?: string; message?: string }) {
+  return (
+    data.code === 'tool_call_limit_exceeded' ||
+    data.message === 'Exceeded maximum tool call rounds'
+  )
+}
+
+function getToolCallLimitReply(
+  data: { reply?: string },
+  conversationSettings: ConversationSettingsConfig,
+) {
+  const eventReply = data.reply?.trim()
+  if (eventReply) return eventReply
+  const configured = conversationSettings.tool_call_limit_reply.content.trim()
+  return configured || DEFAULT_CONVERSATION_SETTINGS.tool_call_limit_reply.content
+}
+
+export function ChatTestDrawer({
+  open,
+  onClose,
+  agentId,
+  conversationSettings,
+}: ChatTestDrawerProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [isStreaming, setIsStreaming] = useState(false)
   const [conversationId, setConversationId] = useState<number | null>(null)
@@ -380,6 +407,10 @@ export function ChatTestDrawer({ open, onClose, agentId }: ChatTestDrawerProps) 
         // Keep any partial reply intact; surface the failure via errorMessage
         // so the UI can render a dedicated banner instead of overwriting content.
         const targetId = currentAssistantRef.current
+        const isToolLimit = isToolCallLimitError(data)
+        const toolLimitReply = isToolLimit
+          ? getToolCallLimitReply(data, conversationSettings)
+          : null
         setMessages(prev => prev.map(m => {
           if (m.id !== targetId) return m
           const thinkBlocks = m.thinkingBlocks.map(b =>
@@ -388,22 +419,39 @@ export function ChatTestDrawer({ open, onClose, agentId }: ChatTestDrawerProps) 
           const contentBlocks = m.contentBlocks.map(b =>
             b.isStreaming ? { ...b, isStreaming: false } : b
           )
+          const nextContentBlocks = [...contentBlocks]
+          let content = m.content
+          if (toolLimitReply) {
+            nextContentBlocks.push({
+              id: `content_limit_${Date.now()}`,
+              content: toolLimitReply,
+              llmStepId: lastLlmStepIdRef.current,
+              isStreaming: false,
+              timelineIndex: ++timelineCounterRef.current,
+            })
+            content = content ? `${content}\n\n${toolLimitReply}` : toolLimitReply
+          }
+          const toolBlocks = m.toolBlocks.map(b =>
+            b.isExecuting ? { ...b, isExecuting: false } : b
+          )
           return {
             ...m,
+            content,
             isStreaming: false,
             thinkingBlocks: thinkBlocks,
-            contentBlocks,
-            errorMessage: data.message || '连接中断，请稍后重试',
+            contentBlocks: nextContentBlocks,
+            toolBlocks,
+            errorMessage: isToolLimit ? null : data.message || '连接中断，请稍后重试',
           }
         }))
         setIsStreaming(false)
         currentAssistantRef.current = null
       },
-    }, undefined, externalId)
+    }, { source: 'testchat' }, undefined, externalId)
 
     abortRef.current = controller
     await controller.completion
-  }, [agentId, conversationId, externalId])
+  }, [agentId, conversationId, conversationSettings, externalId])
 
   const handleCancel = useCallback(async () => {
     abortRef.current?.abort()

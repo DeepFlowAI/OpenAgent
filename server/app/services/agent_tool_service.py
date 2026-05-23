@@ -12,9 +12,17 @@ from app.schemas.agent_tool import (
     AgentToolCreate,
     AgentToolToggle,
     AgentToolUpdate,
+    HUMAN_HANDOFF_TOOL_NAME,
+    HUMAN_HANDOFF_TOOL_TYPE,
+    build_human_handoff_parameters_schema,
+    normalize_human_handoff_config,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_human_handoff_reserved_name(name: str | None) -> bool:
+    return isinstance(name, str) and name.strip() == HUMAN_HANDOFF_TOOL_NAME
 
 # Shown on filter root — stops models from splitting ranges into multiple tool calls
 _FILTER_SINGLE_TOOL_CALL_HINT = (
@@ -285,6 +293,12 @@ class AgentToolService:
     async def create(
         db: AsyncSession, agent_id: int, tenant_id: str, data: AgentToolCreate
     ):
+        if (
+            data.tool_type == HUMAN_HANDOFF_TOOL_TYPE
+            or _is_human_handoff_reserved_name(data.name)
+        ):
+            raise ValidationError("Human handoff is a system tool and cannot be created manually")
+
         existing = await AgentToolRepository.get_by_agent_and_name(
             db, agent_id, data.name
         )
@@ -312,9 +326,27 @@ class AgentToolService:
         if not item or item.agent_id != agent_id:
             raise NotFoundError("Agent tool not found")
         if item.is_system:
-            raise ValidationError("Cannot modify system tool configuration")
+            if item.tool_type != HUMAN_HANDOFF_TOOL_TYPE:
+                raise ValidationError("Cannot modify system tool configuration")
 
         update_data = data.model_dump(exclude_unset=True)
+
+        if item.is_system and item.tool_type == HUMAN_HANDOFF_TOOL_TYPE:
+            invalid_fields = set(update_data) - {"description", "config"}
+            if invalid_fields:
+                raise ValidationError("Cannot modify fixed human handoff tool fields")
+            if "config" in update_data:
+                normalized_config = normalize_human_handoff_config(
+                    update_data.get("config")
+                )
+                update_data["config"] = normalized_config
+                update_data["parameters_schema"] = build_human_handoff_parameters_schema(
+                    normalized_config
+                )
+            return await AgentToolRepository.update(db, item, update_data)
+
+        if "name" in update_data and _is_human_handoff_reserved_name(update_data["name"]):
+            raise ValidationError("Human handoff is a reserved system tool name")
 
         if "name" in update_data and update_data["name"] != item.name:
             existing = await AgentToolRepository.get_by_agent_and_name(

@@ -3,9 +3,16 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useParams, useSearchParams } from 'next/navigation'
 import { cn } from '@/utils/classnames'
-import { get } from '@/service/base'
-import { sendPublicChatMessage } from '@/service/use-chat'
+import { get, getErrorMessage } from '@/service/base'
+import {
+  cancelPublicChatMessage,
+  sendPublicChatMessage,
+  type ChatEventHandlers,
+  type ChatStreamController,
+} from '@/service/use-chat'
+import { submitPublicStepFeedback } from '@/service/use-feedback'
 import type { Conversation, ConversationTimelineResponse, StepTimelineItem } from '@/models/conversation'
+import type { FeedbackRating, StepFeedbackResponse } from '@/models/feedback'
 import {
   useExternalStoreRuntime,
   AssistantRuntimeProvider,
@@ -21,11 +28,26 @@ import {
   ThinkingBlockUI,
   ToolBlockUI,
   InlineContentUI,
+  MarkdownContent,
   StreamingMarkdownContent,
   StreamingThinkingPlaceholder,
 } from '@/app/components/features/chat-message-blocks'
+import { WelcomeEmbedFrame } from '@/app/components/features/welcome-embed-frame'
+import {
+  DEFAULT_CONVERSATION_SETTINGS,
+  type ConversationSettingsConfig,
+  type WelcomeMessageBlock,
+} from '@/models/agent'
 import type { PublicChannel } from '@/models/channel'
 import type { ChatMessage, ToolBlock } from '@/models/conversation'
+import {
+  isValidWelcomeBlock,
+  normalizeConversationSettings,
+} from '@/utils/welcome-message'
+import {
+  getSamePageNavigationLinkProps,
+  normalizeSamePageNavigationAllowlist,
+} from '@/utils/same-page-navigation-allowlist'
 import {
   IconPlus,
   IconX,
@@ -39,6 +61,11 @@ import {
   IconCheck,
   IconMessageCircleQuestion,
   IconHeadset,
+  IconInfoCircle,
+  IconThumbUp,
+  IconThumbUpFilled,
+  IconThumbDown,
+  IconThumbDownFilled,
 } from '@tabler/icons-react'
 
 // ─── Types ────────────────────────────────────────────────
@@ -92,6 +119,7 @@ type AppearanceCfg = {
 
 type BehaviorCfg = {
   inputPlaceholder?: string
+  feedbackEnabled?: boolean
 }
 
 type StoredConv = {
@@ -99,6 +127,81 @@ type StoredConv = {
   title: string
   conversationId: number
   messages: ChatMessage[]
+}
+
+type StreamTurnStatus =
+  | 'active'
+  | 'detached'
+  | 'resuming'
+  | 'done'
+  | 'error'
+  | 'cancelled'
+
+type StreamTurn = {
+  clientMessageId: string
+  requestId: string
+  conversationId: number | null
+  userText: string
+  userMessageId: string
+  assistantMessageId: string
+  messages: ChatMessage[]
+  lastEventId: string | null
+  lastLlmStepId: number | null
+  timelineCounter: number
+  status: StreamTurnStatus
+  controller: ChatStreamController | null
+  replayContentCursor: string | null
+  replayThinkingCursor: string | null
+}
+
+function cloneMessage(message: ChatMessage): ChatMessage {
+  return {
+    ...message,
+    thinkingBlocks: message.thinkingBlocks.map(block => ({ ...block })),
+    contentBlocks: message.contentBlocks.map(block => ({ ...block })),
+    toolBlocks: message.toolBlocks.map(block => ({ ...block })),
+    retryStatus: message.retryStatus ? { ...message.retryStatus } : message.retryStatus,
+  }
+}
+
+function cloneMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map(cloneMessage)
+}
+
+function isPendingTurn(status: StreamTurnStatus) {
+  return status === 'active' || status === 'detached' || status === 'resuming'
+}
+
+function isLiveTurn(status: StreamTurnStatus) {
+  return status === 'active' || status === 'resuming'
+}
+
+function consumeReplayPrefix(
+  turn: StreamTurn,
+  kind: 'content' | 'thinking',
+  existing: string,
+  delta: string,
+) {
+  const key = kind === 'content' ? 'replayContentCursor' : 'replayThinkingCursor'
+  const cursor = turn[key]
+  if (cursor === null) return delta
+
+  const replayedNext = cursor + delta
+  if (existing.startsWith(replayedNext)) {
+    turn[key] = replayedNext
+    return ''
+  }
+
+  if (cursor.length < existing.length) {
+    const remainingExisting = existing.slice(cursor.length)
+    if (delta.startsWith(remainingExisting)) {
+      turn[key] = null
+      return delta.slice(remainingExisting.length)
+    }
+  }
+
+  turn[key] = null
+  return delta
 }
 
 // ─── localStorage helpers ─────────────────────────────────
@@ -161,6 +264,39 @@ function saveConversations(channelId: number, convs: StoredConv[]) {
 let _counter = 0
 function genId() { return `msg_${Date.now()}_${++_counter}` }
 
+function isToolCallLimitError(data: { code?: string; message?: string }) {
+  return (
+    data.code === 'tool_call_limit_exceeded' ||
+    data.message === 'Exceeded maximum tool call rounds'
+  )
+}
+
+function getToolCallLimitReply(
+  data: { reply?: string },
+  conversationSettings: ConversationSettingsConfig,
+) {
+  const eventReply = data.reply?.trim()
+  if (eventReply) return eventReply
+  const configured = conversationSettings.tool_call_limit_reply.content.trim()
+  return configured || DEFAULT_CONVERSATION_SETTINGS.tool_call_limit_reply.content
+}
+
+function getEmbedExternalUserId(token: string | null): string | null {
+  if (!token) return null
+  try {
+    const payload = token.split('.')[1]
+    if (!payload) return null
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/')
+    const padded = `${base64}${'='.repeat((4 - base64.length % 4) % 4)}`
+    const data = JSON.parse(atob(padded)) as { external_user_id?: unknown }
+    return typeof data.external_user_id === 'string' && data.external_user_id
+      ? data.external_user_id
+      : null
+  } catch {
+    return null
+  }
+}
+
 // `100dvh` (dynamic viewport) tracks the mobile address bar show/hide so the
 // composer stays inside the visible area without external scroll. We do NOT
 // bind to `visualViewport.height` here: on some Android browsers it lags
@@ -218,11 +354,17 @@ function stepsToMessages(steps: StepTimelineItem[]): ChatMessage[] {
           toolBlocks: [],
           llmStepId: null,
           assistantStepId: step.id,
+          feedbackRating: step.feedback_rating,
+          feedbackComment: step.feedback_comment,
+          feedbackUpdatedAt: step.feedback_updated_at,
         }
       } else {
         currentAssistant.content = step.content || ''
         currentAssistant.timestamp = ts
         currentAssistant.assistantStepId = step.id
+        currentAssistant.feedbackRating = step.feedback_rating
+        currentAssistant.feedbackComment = step.feedback_comment
+        currentAssistant.feedbackUpdatedAt = step.feedback_updated_at
         currentAssistant.contentBlocks.push({
           id: `srv_cb_${step.id}`,
           content: step.content || '',
@@ -303,7 +445,15 @@ function parseRadius(v?: string, fallback = '10') {
   return `${parts[0]}px`
 }
 
-function HeaderCustomButton({ imageUrl, href }: { imageUrl: string; href: string }) {
+function HeaderCustomButton({
+  imageUrl,
+  href,
+  samePageNavigationUrlAllowlist,
+}: {
+  imageUrl: string
+  href: string
+  samePageNavigationUrlAllowlist: readonly string[]
+}) {
   const [failed, setFailed] = useState(false)
   const img = (imageUrl || '').trim()
   if (!img || failed) return null
@@ -321,11 +471,12 @@ function HeaderCustomButton({ imageUrl, href }: { imageUrl: string; href: string
     />
   )
   if (isHttp) {
+    const linkProps = getSamePageNavigationLinkProps(rawHref, samePageNavigationUrlAllowlist)
     return (
       <a
         href={rawHref}
-        target="_blank"
-        rel="noopener noreferrer"
+        target={linkProps.target}
+        rel={linkProps.rel}
         className={className}
         aria-label="自定义链接"
       >
@@ -345,9 +496,11 @@ function SidebarContent({
   titleColor,
   headerCustomButtonImage,
   headerCustomButtonUrl,
+  samePageNavigationUrlAllowlist,
   isEmbed,
   storedConvs,
   activeConvId,
+  conversationStatuses,
   onNewChat,
   onSwitchConv,
 }: {
@@ -357,9 +510,11 @@ function SidebarContent({
   titleColor: string
   headerCustomButtonImage: string
   headerCustomButtonUrl: string
+  samePageNavigationUrlAllowlist: readonly string[]
   isEmbed: boolean
   storedConvs: StoredConv[]
   activeConvId: number | null
+  conversationStatuses: Map<number, StreamTurnStatus>
   onNewChat: () => void
   onSwitchConv: (conv: StoredConv) => void
 }) {
@@ -385,10 +540,18 @@ function SidebarContent({
           </div>
           {isEmbed ? (
             <div className="shrink-0 md:hidden">
-              <HeaderCustomButton imageUrl={headerCustomButtonImage} href={headerCustomButtonUrl} />
+              <HeaderCustomButton
+                imageUrl={headerCustomButtonImage}
+                href={headerCustomButtonUrl}
+                samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
+              />
             </div>
           ) : (
-            <HeaderCustomButton imageUrl={headerCustomButtonImage} href={headerCustomButtonUrl} />
+            <HeaderCustomButton
+              imageUrl={headerCustomButtonImage}
+              href={headerCustomButtonUrl}
+              samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
+            />
           )}
         </div>
         <button
@@ -407,6 +570,12 @@ function SidebarContent({
         <div className="flex flex-col gap-[3px]">
           {storedConvs.filter(conv => conv.messages.length > 0).map((conv) => {
             const isActive = conv.conversationId === activeConvId
+            const status = conversationStatuses.get(conv.conversationId)
+            const statusLabel = status === 'active' || status === 'detached' || status === 'resuming'
+              ? '生成中'
+              : status === 'error'
+                ? '失败'
+                : ''
             return (
               <button
                 type="button"
@@ -430,28 +599,52 @@ function SidebarContent({
                 onClick={() => onSwitchConv(conv)}
               >
                 <IconMessageCircleQuestion size={16} stroke={1.5} className={isActive ? 'shrink-0 text-[#1A1A1A]' : 'shrink-0 text-[#737373]'} />
-                <span className={cn('truncate text-[13px]', isActive ? 'font-medium text-[#1A1A1A]' : 'text-[#737373]')}>
+                <span className={cn('min-w-0 flex-1 truncate text-[13px]', isActive ? 'font-medium text-[#1A1A1A]' : 'text-[#737373]')}>
                   {conv.title || '新会话'}
                 </span>
+                {statusLabel ? (
+                  <span
+                    className={cn(
+                      'shrink-0 rounded-full px-1.5 py-0.5 text-[10px] leading-none',
+                      status === 'error'
+                        ? 'bg-[#FEF2F2] text-[#B91C1C]'
+                        : 'bg-[#ECFDF5] text-[#047857]',
+                    )}
+                  >
+                    {statusLabel}
+                  </span>
+                ) : null}
               </button>
             )
           })}
         </div>
       </div>
-      <SidebarFooter appearance={appearance} />
+      <SidebarFooter
+        appearance={appearance}
+        samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
+      />
     </>
   )
 }
 
 // ─── Sidebar footer (company intro + privacy link) ────────
 
-function SidebarFooter({ appearance }: { appearance: AppearanceCfg }) {
+function SidebarFooter({
+  appearance,
+  samePageNavigationUrlAllowlist,
+}: {
+  appearance: AppearanceCfg
+  samePageNavigationUrlAllowlist: readonly string[]
+}) {
   const logos = (appearance.sidebarFooterLogos || []).filter(s => (s || '').trim().length > 0)
   const intro = (appearance.sidebarFooterIntro || '').trim()
   const subtext = (appearance.sidebarFooterSubtext || '').trim()
   const linkLabel = (appearance.sidebarFooterLinkLabel || '').trim()
   const linkUrl = (appearance.sidebarFooterLinkUrl || '').trim()
   const showLink = Boolean(linkLabel) && Boolean(linkUrl)
+  const linkProps = showLink
+    ? getSamePageNavigationLinkProps(linkUrl, samePageNavigationUrlAllowlist)
+    : null
 
   if (logos.length === 0 && !intro && !subtext && !showLink) return null
 
@@ -473,8 +666,8 @@ function SidebarFooter({ appearance }: { appearance: AppearanceCfg }) {
       {showLink && (
         <a
           href={linkUrl}
-          target="_blank"
-          rel="noopener noreferrer"
+          target={linkProps?.target}
+          rel={linkProps?.rel}
           className="self-start text-[12px] underline-offset-2 hover:underline"
         >
           {linkLabel}
@@ -498,6 +691,41 @@ function SidebarFooterLogo({ src }: { src: string }) {
   )
 }
 
+function isTruthyQueryParam(
+  params: ReturnType<typeof useSearchParams>,
+  name: string,
+): boolean {
+  for (const [key, value] of params.entries()) {
+    if (
+      key.toLowerCase() === name &&
+      ['true', '1', 'yes'].includes(value.toLowerCase())
+    ) {
+      return true
+    }
+  }
+  return false
+}
+
+function normalizeChannelSource(value: string | null): string | null {
+  const normalized = value?.trim() ?? ''
+  if (!normalized) return null
+  if ([...normalized].length > 64) return null
+  if (/[\u0000-\u001F\u007F]/u.test(normalized)) return null
+  return normalized
+}
+
+function getChannelSourceQueryParam(
+  params: ReturnType<typeof useSearchParams>,
+): string | null {
+  for (const [key, value] of params.entries()) {
+    if (key === 'channel_source') {
+      const normalized = normalizeChannelSource(value)
+      if (normalized) return normalized
+    }
+  }
+  return null
+}
+
 // ─── Main Page ────────────────────────────────────────────
 
 export default function ChatPage() {
@@ -506,8 +734,15 @@ export default function ChatPage() {
   const channelToken = params.channelId as string
   const embedParam = (searchParams.get('embed') || '').toLowerCase()
   const isEmbed = embedParam === '1' || embedParam === 'true' || embedParam === 'yes'
-  const embedToken = searchParams.get('token') || null
-  const isMember = Boolean(embedToken?.trim())
+  const rawEmbedToken = searchParams.get('token')?.trim() || null
+  const embedExternalUserId = useMemo(
+    () => getEmbedExternalUserId(rawEmbedToken),
+    [rawEmbedToken],
+  )
+  const embedToken = embedExternalUserId ? rawEmbedToken : null
+  const isMember = Boolean(embedToken)
+  const isTest = isTruthyQueryParam(searchParams, 'test')
+  const channelSource = getChannelSourceQueryParam(searchParams)
 
   const [channel, setChannel] = useState<PublicChannel | null>(null)
   const [loading, setLoading] = useState(true)
@@ -521,12 +756,15 @@ export default function ChatPage() {
   const [storedConvs, setStoredConvs] = useState<StoredConv[]>([])
   const [activeConvId, setActiveConvId] = useState<number | null>(null)
   const [anonUserId] = useState(() => getOrCreateAnonUserId())
+  const [turnStatusVersion, setTurnStatusVersion] = useState(0)
 
-  const abortRef = useRef<AbortController | null>(null)
-  const currentAssistantRef = useRef<string | null>(null)
-  const lastLlmStepIdRef = useRef<number | null>(null)
-  const timelineCounterRef = useRef(0)
+  const abortRef = useRef<ChatStreamController | null>(null)
+  const messagesRef = useRef<ChatMessage[]>([])
   const conversationIdRef = useRef<number | null>(null)
+  const activeConversationIdRef = useRef<number | null>(null)
+  const isStreamingRef = useRef(false)
+  const turnsByClientMessageIdRef = useRef<Map<string, StreamTurn>>(new Map())
+  const turnByConversationIdRef = useRef<Map<number, string>>(new Map())
 
   const appearance = useMemo<AppearanceCfg>(() => {
     const cfg = channel?.config as Record<string, unknown> | undefined
@@ -543,13 +781,13 @@ export default function ChatPage() {
   const mobileHeaderLogo = isMember
     ? (appearance.mobileMemberLogo || defaultMobileLogo)
     : defaultMobileLogo
-  const defaultPcEmptyStateImage = (appearance.pcEmptyStateImage || '').trim() || sidebarLogo
-  const defaultMobileEmptyStateImage = (appearance.mobileEmptyStateImage || '').trim() || mobileHeaderLogo
+  const defaultPcEmptyStateImage = (appearance.pcEmptyStateImage || '').trim()
+  const defaultMobileEmptyStateImage = (appearance.mobileEmptyStateImage || '').trim()
   const pcEmptyStateImage = isMember
-    ? ((appearance.pcMemberEmptyStateImage || '').trim() || defaultPcEmptyStateImage)
+    ? (appearance.pcMemberEmptyStateImage || '').trim()
     : defaultPcEmptyStateImage
   const mobileEmptyStateImage = isMember
-    ? ((appearance.mobileMemberEmptyStateImage || '').trim() || defaultMobileEmptyStateImage)
+    ? (appearance.mobileMemberEmptyStateImage || '').trim()
     : defaultMobileEmptyStateImage
 
   const headerCustomBtnImg = (appearance.headerCustomButtonImage || '').trim()
@@ -567,10 +805,33 @@ export default function ChatPage() {
     const cfg = channel?.config as Record<string, unknown> | undefined
     return ((cfg?.behavior ?? {}) as BehaviorCfg)
   }, [channel])
+  const samePageNavigationUrlAllowlist = useMemo(() => {
+    const cfg = channel?.config as Record<string, unknown> | undefined
+    const rawAllowlist = cfg?.samePageNavigationUrlAllowlist
+    const result = normalizeSamePageNavigationAllowlist(
+      Array.isArray(rawAllowlist)
+        ? rawAllowlist.filter((item): item is string => typeof item === 'string')
+        : null
+    )
+    return result.error ? [] : result.patterns
+  }, [channel])
+  const conversationSettings = useMemo(
+    () => normalizeConversationSettings(channel?.conversation_settings),
+    [channel],
+  )
 
   const agentId = channel?.agent_id ?? null
 
   const channelId = channel?.id ?? 0
+  const historyUserId = embedExternalUserId || anonUserId
+
+  useEffect(() => {
+    isStreamingRef.current = isStreaming
+  }, [isStreaming])
+
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
 
   useEffect(() => {
     get<PublicChannel>(`v1/public/channels/${channelToken}`)
@@ -578,48 +839,91 @@ export default function ChatPage() {
       .catch(() => { setError('渠道不存在或已被删除'); setLoading(false) })
   }, [channelToken])
 
-  // Load conversation history from server using anonymous user ID
+  useEffect(() => {
+    if (!isEmbed || loading || typeof window === 'undefined') return
+    window.parent.postMessage({ type: 'openagent-ready' }, '*')
+  }, [isEmbed, loading])
+
+  const refreshConversations = useCallback(async (syncActive = false) => {
+    if (!channelId) return
+    if (!historyUserId) return
+    try {
+      const convs = await get<Conversation[]>(
+        `v1/public/channels/${channelToken}/conversations?external_user_id=${encodeURIComponent(historyUserId)}`
+      )
+      const rebuilt: StoredConv[] = await Promise.all(
+        convs.map(async (conv) => {
+          try {
+            const timeline = await get<ConversationTimelineResponse>(
+              `v1/public/channels/${channelToken}/conversations/${conv.id}/steps`
+            )
+            return {
+              id: conv.id,
+              title: conv.title || '新会话',
+              conversationId: conv.id,
+              messages: stepsToMessages(timeline.steps),
+            }
+          } catch {
+            return {
+              id: conv.id,
+              title: conv.title || '新会话',
+              conversationId: conv.id,
+              messages: [],
+            }
+          }
+        })
+      )
+      const merged = rebuilt.map((conv) => {
+        const turnId = turnByConversationIdRef.current.get(conv.conversationId)
+        const turn = turnId ? turnsByClientMessageIdRef.current.get(turnId) : null
+        return turn && isPendingTurn(turn.status)
+          ? { ...conv, messages: cloneMessages(turn.messages) }
+          : conv
+      })
+      setStoredConvs(merged)
+      saveConversations(channelId, merged)
+
+      const activeId = conversationIdRef.current
+      if (syncActive && activeId && !isStreamingRef.current) {
+        const active = merged.find(c => c.conversationId === activeId)
+        if (active) {
+          setMessages(cloneMessages(active.messages))
+        }
+      }
+    } catch {
+      /* keep localStorage cache on network failure */
+    }
+  }, [channelId, channelToken, historyUserId])
+
+  // Load conversation history from server using the public user identity.
   useEffect(() => {
     if (!channelId) return
-    // First load from localStorage cache for instant display
     setStoredConvs(loadConversations(channelId))
-    // Then fetch from server for authoritative data
-    const userId = embedToken ? null : anonUserId
-    if (!userId) return
-    get<Conversation[]>(`v1/public/channels/${channelToken}/conversations?external_user_id=${encodeURIComponent(userId)}`)
-      .then(async (convs) => {
-        if (convs.length === 0) return
-        // Fetch steps for each conversation and reconstruct messages
-        const rebuilt: StoredConv[] = await Promise.all(
-          convs.map(async (conv) => {
-            try {
-              const timeline = await get<ConversationTimelineResponse>(
-                `v1/public/channels/${channelToken}/conversations/${conv.id}/steps`
-              )
-              return {
-                id: conv.id,
-                title: conv.title || '新会话',
-                conversationId: conv.id,
-                messages: stepsToMessages(timeline.steps),
-              }
-            } catch {
-              return {
-                id: conv.id,
-                title: conv.title || '新会话',
-                conversationId: conv.id,
-                messages: [],
-              }
-            }
-          })
-        )
-        const valid = rebuilt.filter(c => c.messages.length > 0)
-        if (valid.length > 0) {
-          setStoredConvs(valid)
-          saveConversations(channelId, valid)
-        }
-      })
-      .catch(() => { /* keep localStorage cache on network failure */ })
-  }, [channelId, channelToken, anonUserId, embedToken])
+    void refreshConversations(false)
+  }, [channelId, refreshConversations])
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return
+
+    const refreshOnReturn = () => {
+      if (document.visibilityState !== 'visible') return
+      void refreshConversations(true)
+    }
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'openagent-open') {
+        void refreshConversations(true)
+      }
+    }
+
+    window.addEventListener('focus', refreshOnReturn)
+    window.addEventListener('message', handleMessage)
+    document.addEventListener('visibilitychange', refreshOnReturn)
+    return () => {
+      window.removeEventListener('focus', refreshOnReturn)
+      window.removeEventListener('message', handleMessage)
+      document.removeEventListener('visibilitychange', refreshOnReturn)
+    }
+  }, [refreshConversations])
 
   useEffect(() => {
     if (!channelId || storedConvs.length === 0) return
@@ -662,12 +966,519 @@ export default function ChatPage() {
     }
   }, [])
 
+  const setActiveConversation = useCallback((id: number | null) => {
+    setConversationId(id)
+    setActiveConvId(id)
+    conversationIdRef.current = id
+    activeConversationIdRef.current = id
+  }, [])
+
+  const bumpTurnStatus = useCallback(() => {
+    setTurnStatusVersion(version => version + 1)
+  }, [])
+
+  const persistTurnMessages = useCallback((turn: StreamTurn) => {
+    const conversationIdValue = turn.conversationId
+    if (conversationIdValue == null) return
+    const snapshot = cloneMessages(turn.messages)
+    setStoredConvs((convs) => {
+      const existing = convs.find(c => c.conversationId === conversationIdValue)
+      if (existing) {
+        return convs.map(c =>
+          c.conversationId === conversationIdValue ? { ...c, messages: snapshot } : c
+        )
+      }
+      return [{
+        id: conversationIdValue,
+        title: turn.userText.slice(0, 30) || '新会话',
+        conversationId: conversationIdValue,
+        messages: snapshot,
+      }, ...convs]
+    })
+  }, [])
+
+  const syncTurnToActive = useCallback((turn: StreamTurn) => {
+    if (activeConversationIdRef.current !== turn.conversationId) return
+    const snapshot = cloneMessages(turn.messages)
+    messagesRef.current = snapshot
+    setMessages(snapshot)
+    setIsStreaming(isLiveTurn(turn.status))
+  }, [])
+
+  const updateTurnMessages = useCallback((
+    turn: StreamTurn,
+    updater: (messages: ChatMessage[]) => ChatMessage[],
+  ) => {
+    turn.messages = updater(turn.messages)
+    persistTurnMessages(turn)
+    syncTurnToActive(turn)
+  }, [persistTurnMessages, syncTurnToActive])
+
+  const setTurnStatus = useCallback((turn: StreamTurn, status: StreamTurnStatus) => {
+    turn.status = status
+    bumpTurnStatus()
+    syncTurnToActive(turn)
+  }, [bumpTurnStatus, syncTurnToActive])
+
+  const createTurnHandlers = useCallback((
+    resolveClientMessageId: () => string,
+  ): ChatEventHandlers => {
+    const getTurn = () => turnsByClientMessageIdRef.current.get(resolveClientMessageId())
+
+    const markActive = (turn: StreamTurn) => {
+      if (turn.status === 'resuming') {
+        turn.status = 'active'
+        bumpTurnStatus()
+      }
+    }
+
+    return {
+      onConversationCreated: (data) => {
+        const turn = getTurn()
+        if (!turn) return
+        const wasNewConversation = turn.conversationId == null
+        turn.conversationId = data.conversation_id
+        turnByConversationIdRef.current.set(data.conversation_id, turn.clientMessageId)
+
+        const snapshot = cloneMessages(turn.messages)
+        setStoredConvs((convs) => {
+          const existing = convs.find(c => c.conversationId === data.conversation_id)
+          if (existing) {
+            return convs.map(c =>
+              c.conversationId === data.conversation_id
+                ? { ...c, title: c.title || turn.userText.slice(0, 30), messages: snapshot }
+                : c
+            )
+          }
+          return [{
+            id: data.conversation_id,
+            title: turn.userText.slice(0, 30) || '新会话',
+            conversationId: data.conversation_id,
+            messages: snapshot,
+          }, ...convs]
+        })
+
+        if (
+          wasNewConversation
+          && abortRef.current?.clientMessageId === turn.clientMessageId
+          && isLiveTurn(turn.status)
+        ) {
+          setActiveConversation(data.conversation_id)
+        }
+        syncTurnToActive(turn)
+      },
+      onRoundStart: (data) => {
+        const turn = getTurn()
+        if (!turn) return
+        markActive(turn)
+        if (data.resume) {
+          turn.replayContentCursor = ''
+          turn.replayThinkingCursor = ''
+        }
+        updateTurnMessages(turn, prev => prev.map(m =>
+          m.id === turn.assistantMessageId
+            ? { ...m, isStreaming: true, retryStatus: null, errorMessage: null }
+            : m
+        ))
+      },
+      onThinkingDelta: (data) => {
+        const turn = getTurn()
+        if (!turn) return
+        markActive(turn)
+        updateTurnMessages(turn, prev => prev.map((m) => {
+          if (m.id !== turn.assistantMessageId) return m
+          const existingThinking = m.thinkingBlocks.map(block => block.content).join('')
+          const content = consumeReplayPrefix(turn, 'thinking', existingThinking, data.content)
+          if (!content) return { ...m, retryStatus: null }
+
+          const blocks = [...m.thinkingBlocks]
+          const lastBlock = blocks[blocks.length - 1]
+          if (lastBlock && lastBlock.isStreaming) {
+            blocks[blocks.length - 1] = { ...lastBlock, content: lastBlock.content + content }
+            return { ...m, thinkingBlocks: blocks, retryStatus: null }
+          }
+          const closedContentBlocks = m.contentBlocks.map(b =>
+            b.isStreaming ? { ...b, isStreaming: false } : b
+          )
+          blocks.push({
+            id: `think_${Date.now()}`,
+            content,
+            llmStepId: turn.lastLlmStepId,
+            isStreaming: true,
+            timelineIndex: ++turn.timelineCounter,
+          })
+          return { ...m, thinkingBlocks: blocks, contentBlocks: closedContentBlocks, retryStatus: null }
+        }))
+      },
+      onContentDelta: (data) => {
+        const turn = getTurn()
+        if (!turn) return
+        markActive(turn)
+        updateTurnMessages(turn, prev => prev.map((m) => {
+          if (m.id !== turn.assistantMessageId) return m
+          const content = consumeReplayPrefix(turn, 'content', m.content || '', data.content)
+          if (!content) return { ...m, retryStatus: null }
+
+          const blocks = [...m.contentBlocks]
+          const lastBlock = blocks[blocks.length - 1]
+          if (lastBlock && lastBlock.isStreaming) {
+            blocks[blocks.length - 1] = { ...lastBlock, content: lastBlock.content + content }
+          } else {
+            blocks.push({
+              id: `content_${Date.now()}`,
+              content,
+              llmStepId: turn.lastLlmStepId,
+              isStreaming: true,
+              timelineIndex: ++turn.timelineCounter,
+            })
+          }
+          return { ...m, content: m.content + content, contentBlocks: blocks, retryStatus: null }
+        }))
+      },
+      onToolCall: (data) => {
+        const turn = getTurn()
+        if (!turn) return
+        markActive(turn)
+        updateTurnMessages(turn, prev => prev.map((m) => {
+          if (m.id !== turn.assistantMessageId) return m
+          if (m.toolBlocks.some(tb => tb.toolCallId === data.tool_call_id)) {
+            return { ...m, retryStatus: null }
+          }
+          const toolBlock: ToolBlock = {
+            id: `tool_${data.tool_call_id}`,
+            toolName: data.tool_name,
+            brief: data.brief,
+            toolCallId: data.tool_call_id,
+            stepId: data.step_id,
+            llmStepId: turn.lastLlmStepId,
+            isExecuting: true,
+            timelineIndex: ++turn.timelineCounter,
+          }
+          const thinkBlocks = m.thinkingBlocks.map(b =>
+            b.isStreaming ? { ...b, isStreaming: false, llmStepId: turn.lastLlmStepId } : b
+          )
+          const contentBlocks = m.contentBlocks.map(b =>
+            b.isStreaming ? { ...b, isStreaming: false, llmStepId: turn.lastLlmStepId } : b
+          )
+          return {
+            ...m,
+            thinkingBlocks: thinkBlocks,
+            contentBlocks,
+            toolBlocks: [...m.toolBlocks, toolBlock],
+            retryStatus: null,
+          }
+        }))
+      },
+      onToolResult: (data) => {
+        const turn = getTurn()
+        if (!turn) return
+        updateTurnMessages(turn, prev => prev.map((m) => {
+          if (m.id !== turn.assistantMessageId) return m
+          const tools = m.toolBlocks.map(tb =>
+            tb.toolCallId === data.tool_call_id ? { ...tb, isExecuting: false } : tb
+          )
+          return { ...m, toolBlocks: tools }
+        }))
+      },
+      onLlmStepCreated: (data) => {
+        const turn = getTurn()
+        if (!turn) return
+        turn.lastLlmStepId = data.step_id
+        updateTurnMessages(turn, prev => prev.map((m) => {
+          if (m.id !== turn.assistantMessageId) return m
+          const thinkBlocks = m.thinkingBlocks.map(b =>
+            b.isStreaming ? { ...b, llmStepId: data.step_id } : b
+          )
+          const contentBlocks = m.contentBlocks.map(b =>
+            b.isStreaming ? { ...b, llmStepId: data.step_id } : b
+          )
+          return { ...m, thinkingBlocks: thinkBlocks, contentBlocks, llmStepId: data.step_id }
+        }))
+      },
+      onDone: (data) => {
+        const turn = getTurn()
+        if (!turn) return
+        const snapshot = turn.controller?.getSnapshot()
+        turn.lastEventId = snapshot?.lastEventId ?? turn.lastEventId
+        turn.controller = null
+        if (abortRef.current?.clientMessageId === turn.clientMessageId) {
+          abortRef.current = null
+        }
+        setTurnStatus(turn, 'done')
+        updateTurnMessages(turn, prev => prev.map((m) => {
+          if (m.id !== turn.assistantMessageId) return m
+          const finalContent = data.final_content
+          const thinkBlocks = m.thinkingBlocks.map(b =>
+            b.isStreaming ? { ...b, isStreaming: false, llmStepId: turn.lastLlmStepId } : b
+          )
+          let contentBlocks = m.contentBlocks.map(b =>
+            b.isStreaming ? { ...b, isStreaming: false, llmStepId: turn.lastLlmStepId } : b
+          )
+          let content = m.content
+          if (typeof finalContent === 'string') {
+            const lastIdx = contentBlocks.length - 1
+            if (lastIdx >= 0) {
+              const previous = contentBlocks[lastIdx]
+              contentBlocks = contentBlocks.map((b, idx) =>
+                idx === lastIdx ? { ...b, content: finalContent } : b
+              )
+              content = content.endsWith(previous.content)
+                ? `${content.slice(0, content.length - previous.content.length)}${finalContent}`
+                : finalContent
+            } else if (finalContent) {
+              contentBlocks = [{
+                id: `content_final_${Date.now()}`,
+                content: finalContent,
+                llmStepId: turn.lastLlmStepId,
+                isStreaming: false,
+                timelineIndex: ++turn.timelineCounter,
+              }]
+              content = finalContent
+            }
+          }
+          return {
+            ...m,
+            content,
+            isStreaming: false,
+            thinkingBlocks: thinkBlocks,
+            contentBlocks,
+            timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+            assistantStepId: data.assistant_step_id,
+            retryStatus: null,
+            errorMessage: null,
+          }
+        }))
+      },
+      onRetry: (attempt, maxAttempts) => {
+        const turn = getTurn()
+        if (!turn) return
+        updateTurnMessages(turn, prev => prev.map(m =>
+          m.id === turn.assistantMessageId
+            ? { ...m, retryStatus: { attempt, maxAttempts }, errorMessage: null }
+            : m
+        ))
+      },
+      onAssistantReset: () => {
+        const turn = getTurn()
+        if (!turn) return
+        turn.timelineCounter = 0
+        turn.lastLlmStepId = null
+        turn.replayContentCursor = null
+        turn.replayThinkingCursor = null
+        updateTurnMessages(turn, prev => prev.map(m =>
+          m.id === turn.assistantMessageId
+            ? {
+                ...m,
+                content: '',
+                isStreaming: true,
+                thinkingBlocks: [],
+                contentBlocks: [],
+                toolBlocks: [],
+                llmStepId: null,
+                assistantStepId: null,
+                retryStatus: null,
+              }
+            : m
+        ))
+      },
+      onError: async (data) => {
+        const turn = getTurn()
+        if (!turn) return
+        const isToolLimit = isToolCallLimitError(data)
+        const toolLimitReply = isToolLimit
+          ? getToolCallLimitReply(data, conversationSettings)
+          : null
+        const snapshot = turn.controller?.getSnapshot()
+        turn.lastEventId = snapshot?.lastEventId ?? turn.lastEventId
+        turn.controller = null
+        if (abortRef.current?.clientMessageId === turn.clientMessageId) {
+          abortRef.current = null
+        }
+        setTurnStatus(turn, isToolLimit ? 'done' : 'error')
+        updateTurnMessages(turn, prev => prev.map((m) => {
+          if (m.id !== turn.assistantMessageId) return m
+          const thinkBlocks = m.thinkingBlocks.map(b =>
+            b.isStreaming ? { ...b, isStreaming: false } : b
+          )
+          const contentBlocks = m.contentBlocks.map(b =>
+            b.isStreaming ? { ...b, isStreaming: false } : b
+          )
+          const nextContentBlocks = [...contentBlocks]
+          let content = m.content
+          if (toolLimitReply) {
+            nextContentBlocks.push({
+              id: `content_limit_${Date.now()}`,
+              content: toolLimitReply,
+              llmStepId: turn.lastLlmStepId,
+              isStreaming: false,
+              timelineIndex: ++turn.timelineCounter,
+            })
+            content = content ? `${content}\n\n${toolLimitReply}` : toolLimitReply
+          }
+          const toolBlocks = m.toolBlocks.map(b =>
+            b.isExecuting ? { ...b, isExecuting: false } : b
+          )
+          return {
+            ...m,
+            content,
+            isStreaming: false,
+            thinkingBlocks: thinkBlocks,
+            contentBlocks: nextContentBlocks,
+            toolBlocks,
+            retryStatus: null,
+            errorMessage: isToolLimit ? null : data.message || '连接中断，请稍后重试',
+          }
+        }))
+        if (isToolLimit) return
+
+        const capturedCid = turn.conversationId
+        const targetId = turn.assistantMessageId
+        if (!capturedCid) return
+        try {
+          const data2 = await get<ConversationTimelineResponse>(
+            `v1/public/channels/${channelToken}/conversations/${capturedCid}/steps`,
+          )
+          const latestTurn = turnsByClientMessageIdRef.current.get(turn.clientMessageId)
+          if (!latestTurn || latestTurn.conversationId !== capturedCid) return
+          const rebuilt = stepsToMessages(data2.steps)
+          const lastServerAsst = [...rebuilt].reverse().find(m => m.role === 'assistant')
+          if (!lastServerAsst || lastServerAsst.assistantStepId == null) return
+
+          let shouldReplace = false
+          latestTurn.messages.forEach((m) => {
+            if (m.id !== targetId) return
+            const alreadyShown = latestTurn.messages.some(other =>
+              other.id !== targetId
+              && other.role === 'assistant'
+              && other.assistantStepId === lastServerAsst.assistantStepId,
+            )
+            if (alreadyShown) return
+            const localComplete = m.assistantStepId != null
+            const localContentLen = (m.content || '').length
+            const serverContentLen = (lastServerAsst.content || '').length
+            shouldReplace = !localComplete || serverContentLen > localContentLen
+          })
+          if (!shouldReplace) return
+          setTurnStatus(latestTurn, 'done')
+          updateTurnMessages(latestTurn, prev => prev.map(m =>
+            m.id === targetId
+              ? { ...lastServerAsst, id: m.id, retryStatus: null, errorMessage: null }
+              : m
+          ))
+        } catch {
+          // Reconciliation is best-effort; keep the partial content plus error banner.
+        }
+      },
+    }
+  }, [
+    bumpTurnStatus,
+    channelToken,
+    conversationSettings,
+    setActiveConversation,
+    setTurnStatus,
+    syncTurnToActive,
+    updateTurnMessages,
+  ])
+
+  const detachActiveStream = useCallback(() => {
+    const controller = abortRef.current
+    if (!controller) return
+    const turn = turnsByClientMessageIdRef.current.get(controller.clientMessageId)
+    const snapshot = controller.detach()
+    abortRef.current = null
+    if (!turn || !isPendingTurn(turn.status)) return
+
+    turn.requestId = snapshot.requestId
+    turn.lastEventId = snapshot.lastEventId
+    turn.conversationId = snapshot.conversationId ?? turn.conversationId
+    if (turn.conversationId != null) {
+      turnByConversationIdRef.current.set(turn.conversationId, turn.clientMessageId)
+    }
+    if (activeConversationIdRef.current === turn.conversationId) {
+      turn.messages = cloneMessages(messagesRef.current)
+    }
+    turn.controller = null
+    setTurnStatus(turn, 'detached')
+    persistTurnMessages(turn)
+  }, [persistTurnMessages, setTurnStatus])
+
+  const resumeTurn = useCallback((turn: StreamTurn) => {
+    if (!agentId || turn.status !== 'detached') return
+    setTurnStatus(turn, 'resuming')
+    const controller = sendPublicChatMessage(
+      channelToken,
+      turn.userText,
+      turn.conversationId,
+      createTurnHandlers(() => turn.clientMessageId),
+      embedToken,
+      null,
+      undefined,
+      undefined,
+      {
+        requestId: turn.requestId,
+        clientMessageId: turn.clientMessageId,
+        lastEventId: turn.lastEventId,
+        resume: true,
+      },
+    )
+    turn.controller = controller
+    abortRef.current = controller
+    void controller.completion.finally(() => {
+      if (abortRef.current === controller) {
+        abortRef.current = null
+      }
+      if (turn.controller === controller) {
+        turn.controller = null
+      }
+    })
+  }, [agentId, channelToken, createTurnHandlers, embedToken, setTurnStatus])
+
+  const cancelActiveStream = useCallback(async () => {
+    const controller = abortRef.current
+    if (!controller) return
+    const turn = turnsByClientMessageIdRef.current.get(controller.clientMessageId)
+    const snapshot = controller.getSnapshot()
+    abortRef.current = null
+    controller.abort()
+    await cancelPublicChatMessage(channelToken, controller.clientMessageId)
+
+    if (!turn) return
+    turn.requestId = snapshot.requestId
+    turn.lastEventId = snapshot.lastEventId
+    turn.conversationId = snapshot.conversationId ?? turn.conversationId
+    turn.controller = null
+    setTurnStatus(turn, 'cancelled')
+    updateTurnMessages(turn, prev => prev.map((m) => {
+      if (m.id !== turn.assistantMessageId) return m
+      const thinkBlocks = m.thinkingBlocks.map(b =>
+        b.isStreaming ? { ...b, isStreaming: false } : b
+      )
+      const contentBlocks = m.contentBlocks.map(b =>
+        b.isStreaming ? { ...b, isStreaming: false } : b
+      )
+      return { ...m, isStreaming: false, thinkingBlocks: thinkBlocks, contentBlocks, retryStatus: null }
+    }))
+  }, [channelToken, setTurnStatus, updateTurnMessages])
+
   const handleNewMessage = useCallback(async (message: AppendMessage) => {
     if (message.content[0]?.type !== 'text') return
     const text = message.content[0].text.trim()
     if (!text || !agentId) return
 
-    setIsStreaming(true)
+    const existingTurnId = conversationId == null
+      ? null
+      : turnByConversationIdRef.current.get(conversationId)
+    const existingTurn = existingTurnId
+      ? turnsByClientMessageIdRef.current.get(existingTurnId)
+      : null
+    if (existingTurn && isPendingTurn(existingTurn.status)) {
+      if (existingTurn.status === 'detached') resumeTurn(existingTurn)
+      return
+    }
+
+    if (abortRef.current) {
+      detachActiveStream()
+    }
 
     const userMsg: ChatMessage = {
       id: genId(),
@@ -695,413 +1506,158 @@ export default function ChatPage() {
       llmStepId: null,
       assistantStepId: null,
     }
-    currentAssistantRef.current = assistantId
-    timelineCounterRef.current = 0
+    const nextMessages = [...cloneMessages(messagesRef.current), userMsg, assistantMsg]
+    messagesRef.current = nextMessages
+    setMessages(nextMessages)
+    setIsStreaming(true)
 
-    setMessages(prev => [...prev, userMsg, assistantMsg])
-
-    const controller = sendPublicChatMessage(channelToken, text, conversationId, {
-      onConversationCreated: (data) => {
-        setConversationId(data.conversation_id)
-        conversationIdRef.current = data.conversation_id
-        setActiveConvId(data.conversation_id)
-        const newStored: StoredConv = {
-          id: data.conversation_id,
-          title: text.slice(0, 30),
-          conversationId: data.conversation_id,
-          messages: [],
-        }
-        setStoredConvs(prev => [newStored, ...prev])
-      },
-      onThinkingDelta: (data) => {
-        setMessages(prev => prev.map(m => {
-          if (m.id !== currentAssistantRef.current) return m
-          const blocks = [...m.thinkingBlocks]
-          const lastBlock = blocks[blocks.length - 1]
-          if (lastBlock && lastBlock.isStreaming) {
-            blocks[blocks.length - 1] = { ...lastBlock, content: lastBlock.content + data.content }
-            return { ...m, thinkingBlocks: blocks, retryStatus: null }
-          }
-          const closedContentBlocks = m.contentBlocks.map(b =>
-            b.isStreaming ? { ...b, isStreaming: false } : b
+    let clientMessageId = ''
+    const controller = sendPublicChatMessage(
+      channelToken,
+      text,
+      conversationId,
+      createTurnHandlers(() => clientMessageId),
+      embedToken,
+      embedToken
+        ? (
+            isTest || channelSource
+              ? {
+                  ...(isTest ? { is_test: true } : {}),
+                  ...(channelSource ? { channel_source: channelSource } : {}),
+                }
+              : null
           )
-          blocks.push({
-            id: `think_${Date.now()}`,
-            content: data.content,
-            llmStepId: null,
-            isStreaming: true,
-            timelineIndex: ++timelineCounterRef.current,
-          })
-          return { ...m, thinkingBlocks: blocks, contentBlocks: closedContentBlocks, retryStatus: null }
-        }))
-      },
-      onContentDelta: (data) => {
-        setMessages(prev => prev.map(m => {
-          if (m.id !== currentAssistantRef.current) return m
-          const blocks = [...m.contentBlocks]
-          const lastBlock = blocks[blocks.length - 1]
-          if (lastBlock && lastBlock.isStreaming) {
-            blocks[blocks.length - 1] = { ...lastBlock, content: lastBlock.content + data.content }
-          } else {
-            blocks.push({
-              id: `content_${Date.now()}`,
-              content: data.content,
-              llmStepId: lastLlmStepIdRef.current,
-              isStreaming: true,
-              timelineIndex: ++timelineCounterRef.current,
-            })
-          }
-          return { ...m, content: m.content + data.content, contentBlocks: blocks, retryStatus: null }
-        }))
-      },
-      onToolCall: (data) => {
-        const toolBlock: ToolBlock = {
-          id: `tool_${data.tool_call_id}`,
-          toolName: data.tool_name,
-          brief: data.brief,
-          toolCallId: data.tool_call_id,
-          stepId: data.step_id,
-          llmStepId: lastLlmStepIdRef.current,
-          isExecuting: true,
-          timelineIndex: ++timelineCounterRef.current,
-        }
-        setMessages(prev => prev.map(m => {
-          if (m.id !== currentAssistantRef.current) return m
-          const thinkBlocks = m.thinkingBlocks.map(b =>
-            b.isStreaming ? { ...b, isStreaming: false, llmStepId: lastLlmStepIdRef.current } : b
-          )
-          const contentBlocks = m.contentBlocks.map(b =>
-            b.isStreaming ? { ...b, isStreaming: false, llmStepId: lastLlmStepIdRef.current } : b
-          )
-          return { ...m, thinkingBlocks: thinkBlocks, contentBlocks, toolBlocks: [...m.toolBlocks, toolBlock], retryStatus: null }
-        }))
-      },
-      onToolResult: (data) => {
-        setMessages(prev => prev.map(m => {
-          if (m.id !== currentAssistantRef.current) return m
-          const tools = m.toolBlocks.map(tb =>
-            tb.toolCallId === data.tool_call_id ? { ...tb, isExecuting: false } : tb
-          )
-          return { ...m, toolBlocks: tools }
-        }))
-      },
-      onLlmStepCreated: (data) => {
-        lastLlmStepIdRef.current = data.step_id
-        setMessages(prev => prev.map(m => {
-          if (m.id !== currentAssistantRef.current) return m
-          const thinkBlocks = m.thinkingBlocks.map(b =>
-            b.isStreaming ? { ...b, llmStepId: data.step_id } : b
-          )
-          const contentBlocks = m.contentBlocks.map(b =>
-            b.isStreaming ? { ...b, llmStepId: data.step_id } : b
-          )
-          return { ...m, thinkingBlocks: thinkBlocks, contentBlocks, llmStepId: data.step_id }
-        }))
-      },
-      onDone: (data) => {
-        const targetId = currentAssistantRef.current
-        setMessages(prev => {
-          const updated = prev.map(m => {
-            if (m.id !== targetId) return m
-            const finalContent = data.final_content
-            const thinkBlocks = m.thinkingBlocks.map(b =>
-              b.isStreaming ? { ...b, isStreaming: false, llmStepId: lastLlmStepIdRef.current } : b
-            )
-            let contentBlocks = m.contentBlocks.map(b =>
-              b.isStreaming ? { ...b, isStreaming: false, llmStepId: lastLlmStepIdRef.current } : b
-            )
-            let content = m.content
-            if (typeof finalContent === 'string') {
-              const lastIdx = contentBlocks.length - 1
-              if (lastIdx >= 0) {
-                const previous = contentBlocks[lastIdx]
-                contentBlocks = contentBlocks.map((b, idx) =>
-                  idx === lastIdx ? { ...b, content: finalContent } : b
-                )
-                content = content.endsWith(previous.content)
-                  ? `${content.slice(0, content.length - previous.content.length)}${finalContent}`
-                  : finalContent
-              } else if (finalContent) {
-                contentBlocks = [{
-                  id: `content_final_${Date.now()}`,
-                  content: finalContent,
-                  llmStepId: lastLlmStepIdRef.current,
-                  isStreaming: false,
-                  timelineIndex: ++timelineCounterRef.current,
-                }]
-                content = finalContent
-              }
-            }
-            return {
-              ...m,
-              content,
-              isStreaming: false,
-              thinkingBlocks: thinkBlocks,
-              contentBlocks,
-              timestamp: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
-              assistantStepId: data.assistant_step_id,
-              retryStatus: null,
-              errorMessage: null,
-            }
-          })
-          const cid = conversationIdRef.current
-          setStoredConvs(convs => convs.map(c =>
-            c.conversationId === cid ? { ...c, messages: updated } : c
-          ))
-          return updated
-        })
-        setIsStreaming(false)
-        currentAssistantRef.current = null
-      },
-      onRoundStart: (data) => {
-        // Step-replay reconnect (sub-req 4): the server is reattaching us to
-        // an existing round and will re-emit ALL its events from the top.
-        // We MUST wipe the bubble first or the buffer-cold reconnect path
-        // double-renders every delta.
-        //
-        // Buffer fast-path doesn't reach this branch — it slices `seq >
-        // cursor` and skips the round_start frame entirely, so the existing
-        // bubble stays and the missing tail just appends. That's the whole
-        // point of sub-req 4: don't blank pixels the server is about to
-        // confirm with increments.
-        if (!data.resume) return
-        const targetId = currentAssistantRef.current
-        if (!targetId) return
-        timelineCounterRef.current = 0
-        lastLlmStepIdRef.current = null
-        setMessages(prev => prev.map(m => {
-          if (m.id !== targetId) return m
-          return {
-            ...m,
-            content: '',
-            isStreaming: true,
-            thinkingBlocks: [],
-            contentBlocks: [],
-            toolBlocks: [],
-            llmStepId: null,
-            assistantStepId: null,
-            retryStatus: null,
-            errorMessage: null,
-          }
-        }))
-      },
-      onRetry: (attempt, maxAttempts) => {
-        // Sub-req 4: surface "网络不稳，重连中 (n/max)" inline on the
-        // assistant bubble so users understand the brief stall isn't a UI
-        // bug. Do NOT wipe content here — SDK retries now carry
-        // `last_event_id`, and the server's buffer fast-path replays just
-        // the missing tail. Wiping would throw away pixels we're about to
-        // append to. The step-replay path (cold buffer) clears via
-        // `onRoundStart` above; in-stream RESET clears via `onAssistantReset`.
-        const targetId = currentAssistantRef.current
-        if (!targetId) return
-        setMessages(prev => prev.map(m => {
-          if (m.id !== targetId) return m
-          return {
-            ...m,
-            retryStatus: { attempt, maxAttempts },
-            errorMessage: null,
-          }
-        }))
-      },
-      onAssistantReset: () => {
-        // Backend stream-level retry (stream-level retry spec): the LLM stream broke
-        // mid-round and the engine is about to re-stream the SAME tool
-        // round from scratch. Wipe the partial bubble so fresh deltas
-        // land on a clean slate. (Distinct from onRoundStart: this fires
-        // INSIDE one connection, not on reconnect.)
-        const targetId = currentAssistantRef.current
-        if (!targetId) return
-        timelineCounterRef.current = 0
-        lastLlmStepIdRef.current = null
-        setMessages(prev => prev.map(m => {
-          if (m.id !== targetId) return m
-          return {
-            ...m,
-            content: '',
-            isStreaming: true,
-            thinkingBlocks: [],
-            contentBlocks: [],
-            toolBlocks: [],
-            llmStepId: null,
-            assistantStepId: null,
-            retryStatus: null,
-          }
-        }))
-      },
-      onError: async (data) => {
-        // Don't fold error into m.content — that hides "stream cut off mid-reply"
-        // (m.content already had partial text → `||` swallowed the error). Keep
-        // partial content as-is, surface the failure via a dedicated field, and
-        // close out streaming flags on every block so the typewriter flushes.
-        const targetId = currentAssistantRef.current
-        setMessages(prev => {
-          const updated = prev.map(m => {
-            if (m.id !== targetId) return m
-            const thinkBlocks = m.thinkingBlocks.map(b =>
-              b.isStreaming ? { ...b, isStreaming: false } : b
-            )
-            const contentBlocks = m.contentBlocks.map(b =>
-              b.isStreaming ? { ...b, isStreaming: false } : b
-            )
-            return {
-              ...m,
-              isStreaming: false,
-              thinkingBlocks: thinkBlocks,
-              contentBlocks,
-              retryStatus: null,
-              errorMessage: data.message || '连接中断，请稍后重试',
-            }
-          })
-          const cid = conversationIdRef.current
-          if (cid) {
-            setStoredConvs(convs => convs.map(c =>
-              c.conversationId === cid ? { ...c, messages: updated } : c
-            ))
-          }
-          return updated
-        })
-        setIsStreaming(false)
-        currentAssistantRef.current = null
-
-        // Sub-req 4: ultimate-failure timeline reconciliation.
-        //
-        // On a final SSE failure we may still be one of two states:
-        //   (a) Server actually completed the round and persisted a full
-        //       assistant_message; only the SSE delivery to this client died.
-        //   (b) Server gave up mid-stream, leaving partial llm_call rows.
-        //
-        // The public timeline endpoint already filters out `incomplete` steps
-        // (sub-req 2), so anything it returns is publishable. If it has a
-        // FRESHER complete answer than what our UI shows, swap it in and
-        // clear the error banner — the user gets the answer back automatically
-        // instead of being told to retry.
-        const cidForRebuild = conversationIdRef.current
-        if (cidForRebuild && targetId) {
-          // Stash the captured cid; conversationIdRef may shift while we await.
-          const capturedCid = cidForRebuild
-          try {
-            const data2 = await get<ConversationTimelineResponse>(
-              `v1/public/channels/${channelToken}/conversations/${capturedCid}/steps`,
-            )
-            // Guard against late resolution after the user navigated to a
-            // different conversation: discard stale rebuild payloads.
-            if (conversationIdRef.current !== capturedCid) return
-            const rebuilt = stepsToMessages(data2.steps)
-            const lastServerAsst = [...rebuilt].reverse().find(m => m.role === 'assistant')
-            if (!lastServerAsst || lastServerAsst.assistantStepId == null) return
-            setMessages(prev => {
-              const target = prev.find(m => m.id === targetId)
-              if (!target) return prev
-
-              // Anti-duplication guard: the public timeline filters out
-              // `incomplete` steps, so if THIS round never persisted a
-              // complete assistant_message the rebuilt timeline's "last
-              // assistant" is actually the PREVIOUS round's answer. Without
-              // this check we'd copy round N-1's content under round N's
-              // user message. Reconcile only when the server's last assistant
-              // step is NOT already rendered in another message bubble.
-              const alreadyShown = prev.some(m =>
-                m.id !== targetId
-                && m.role === 'assistant'
-                && m.assistantStepId === lastServerAsst.assistantStepId,
-              )
-              if (alreadyShown) return prev
-
-              // Only replace when the server's answer is fresher: it must
-              // have an assistant_step_id (= a complete assistant_message
-              // step) and our local placeholder has no such id, OR our local
-              // content is shorter than the server's (server saw more bytes
-              // before the SSE dropped).
-              const localComplete = target.assistantStepId != null
-              const localContentLen = (target.content || '').length
-              const serverContentLen = (lastServerAsst.content || '').length
-              const shouldReplace =
-                !localComplete || serverContentLen > localContentLen
-              if (!shouldReplace) return prev
-              const updated = prev.map(m => {
-                if (m.id !== targetId) return m
-                // Keep our client id stable so React keys / refs don't shuffle.
-                return { ...lastServerAsst, id: m.id, retryStatus: null, errorMessage: null }
-              })
-              setStoredConvs(convs => convs.map(c =>
-                c.conversationId === capturedCid ? { ...c, messages: updated } : c
-              ))
-              return updated
-            })
-          } catch {
-            // Reconciliation is best-effort — keep the inline error banner.
-          }
-        }
-      },
-    }, embedToken, embedToken ? null : { external_user_id: anonUserId, source: 'chat' })
-
+        : {
+            external_user_id: anonUserId,
+            source: 'websdk',
+            ...(channelSource ? { channel_source: channelSource } : {}),
+            ...(isTest ? { is_test: true } : {}),
+          },
+    )
+    clientMessageId = controller.clientMessageId
+    const snapshot = controller.getSnapshot()
+    const turn: StreamTurn = {
+      clientMessageId: controller.clientMessageId,
+      requestId: controller.requestId,
+      conversationId: snapshot.conversationId,
+      userText: text,
+      userMessageId: userMsg.id,
+      assistantMessageId: assistantId,
+      messages: cloneMessages(nextMessages),
+      lastEventId: snapshot.lastEventId,
+      lastLlmStepId: null,
+      timelineCounter: 0,
+      status: 'active',
+      controller,
+      replayContentCursor: null,
+      replayThinkingCursor: null,
+    }
+    turnsByClientMessageIdRef.current.set(turn.clientMessageId, turn)
+    if (turn.conversationId != null) {
+      turnByConversationIdRef.current.set(turn.conversationId, turn.clientMessageId)
+    }
     abortRef.current = controller
-    await controller.completion
-  }, [agentId, conversationId, embedToken, anonUserId])
+    persistTurnMessages(turn)
+    bumpTurnStatus()
+
+    try {
+      await controller.completion
+    } finally {
+      if (abortRef.current === controller) {
+        abortRef.current = null
+      }
+      if (turn.controller === controller) {
+        turn.controller = null
+      }
+    }
+  }, [
+    agentId,
+    anonUserId,
+    bumpTurnStatus,
+    channelSource,
+    channelToken,
+    conversationId,
+    createTurnHandlers,
+    detachActiveStream,
+    embedToken,
+    isEmbed,
+    isTest,
+    persistTurnMessages,
+    resumeTurn,
+  ])
 
   const handleCancel = useCallback(async () => {
-    abortRef.current?.abort()
-    const targetId = currentAssistantRef.current
-    if (targetId) {
-      setMessages(prev => {
-        const updated = prev.map(m => {
-          if (m.id !== targetId) return m
-          const thinkBlocks = m.thinkingBlocks.map(b =>
-            b.isStreaming ? { ...b, isStreaming: false } : b
-          )
-          const contentBlocks = m.contentBlocks.map(b =>
-            b.isStreaming ? { ...b, isStreaming: false } : b
-          )
-          return { ...m, isStreaming: false, thinkingBlocks: thinkBlocks, contentBlocks }
-        })
-        const cid = conversationIdRef.current
-        if (cid) {
-          setStoredConvs(convs => convs.map(c =>
-            c.conversationId === cid ? { ...c, messages: updated } : c
-          ))
-        }
-        return updated
-      })
-      currentAssistantRef.current = null
+    await cancelActiveStream()
+  }, [cancelActiveStream])
+
+  const handleFeedbackSubmitted = useCallback((
+    messageId: string,
+    feedback: StepFeedbackResponse,
+  ) => {
+    const applyFeedback = (items: ChatMessage[]) => items.map((item) =>
+      item.id === messageId
+        ? {
+            ...item,
+            feedbackRating: feedback.feedback_rating,
+            feedbackComment: feedback.feedback_comment,
+            feedbackUpdatedAt: feedback.feedback_updated_at,
+          }
+        : item
+    )
+
+    const nextMessages = applyFeedback(messagesRef.current)
+    messagesRef.current = nextMessages
+    setMessages(nextMessages)
+
+    const activeId = activeConversationIdRef.current
+    if (activeId != null) {
+      setStoredConvs((convs) => convs.map((conv) =>
+        conv.conversationId === activeId
+          ? { ...conv, messages: applyFeedback(conv.messages) }
+          : conv
+      ))
+
+      const turnId = turnByConversationIdRef.current.get(activeId)
+      const turn = turnId ? turnsByClientMessageIdRef.current.get(turnId) : null
+      if (turn) {
+        turn.messages = applyFeedback(turn.messages)
+      }
     }
-    setIsStreaming(false)
   }, [])
 
   // Note: runtime is created inside ChatThreadView (keyed by activeConvId)
   // so it gets destroyed and recreated on conversation switch.
 
   const handleNewChat = useCallback(() => {
-    if (isStreaming) {
-      abortRef.current?.abort()
-      setIsStreaming(false)
+    if (abortRef.current) {
+      detachActiveStream()
     }
+    setActiveConversation(null)
+    messagesRef.current = []
     setMessages([])
-    setConversationId(null)
-    conversationIdRef.current = null
-    setActiveConvId(null)
-    currentAssistantRef.current = null
-    lastLlmStepIdRef.current = null
-    timelineCounterRef.current = 0
+    setIsStreaming(false)
     setSidebarOpen(false)
-  }, [isStreaming])
+  }, [detachActiveStream, setActiveConversation])
 
   const handleSwitchConv = useCallback((conv: StoredConv) => {
     if (conv.conversationId === conversationIdRef.current) return
     if (abortRef.current) {
-      abortRef.current.abort()
-      abortRef.current = null
+      detachActiveStream()
     }
-    setIsStreaming(false)
-    currentAssistantRef.current = null
-    lastLlmStepIdRef.current = null
-    timelineCounterRef.current = 0
-    setMessages(conv.messages.map(m => ({ ...m })))
-    setConversationId(conv.conversationId)
-    conversationIdRef.current = conv.conversationId
-    setActiveConvId(conv.conversationId)
+    const turnId = turnByConversationIdRef.current.get(conv.conversationId)
+    const turn = turnId ? turnsByClientMessageIdRef.current.get(turnId) : null
+    const nextMessages = turn && isPendingTurn(turn.status)
+      ? cloneMessages(turn.messages)
+      : cloneMessages(conv.messages)
+    messagesRef.current = nextMessages
+    setMessages(nextMessages)
+    setActiveConversation(conv.conversationId)
+    setIsStreaming(turn ? isLiveTurn(turn.status) : false)
     setSidebarOpen(false)
-  }, [])
+    if (turn?.status === 'detached') {
+      resumeTurn(turn)
+    }
+  }, [detachActiveStream, resumeTurn, setActiveConversation])
 
   const handleClose = useCallback(() => {
     if (isEmbed && typeof window !== 'undefined') {
@@ -1111,6 +1667,16 @@ export default function ChatPage() {
 
   const defaultUserRadius = isEmbed ? '16 16 4 16' : '14 14 4 14'
   const defaultAgentRadius = isEmbed ? '4 16 16 16' : '4 14 14 14'
+  const conversationStatuses = useMemo(() => {
+    void turnStatusVersion
+    const statuses = new Map<number, StreamTurnStatus>()
+    for (const turn of turnsByClientMessageIdRef.current.values()) {
+      if (turn.conversationId != null && turn.status !== 'done' && turn.status !== 'cancelled') {
+        statuses.set(turn.conversationId, turn.status)
+      }
+    }
+    return statuses
+  }, [turnStatusVersion])
 
   // ── Loading / Error states ──
 
@@ -1160,9 +1726,11 @@ export default function ChatPage() {
             titleColor={pcTitleColor}
             headerCustomButtonImage={resolvedHeaderCustomImage}
             headerCustomButtonUrl={resolvedHeaderCustomUrl}
+            samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
             isEmbed={isEmbed}
             storedConvs={storedConvs}
             activeConvId={activeConvId}
+            conversationStatuses={conversationStatuses}
             onNewChat={handleNewChat}
             onSwitchConv={handleSwitchConv}
           />
@@ -1195,9 +1763,11 @@ export default function ChatPage() {
               titleColor={pcTitleColor}
               headerCustomButtonImage={resolvedHeaderCustomImage}
               headerCustomButtonUrl={resolvedHeaderCustomUrl}
+              samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
               isEmbed={isEmbed}
               storedConvs={storedConvs}
               activeConvId={activeConvId}
+              conversationStatuses={conversationStatuses}
               onNewChat={handleNewChat}
               onSwitchConv={handleSwitchConv}
             />
@@ -1256,6 +1826,7 @@ export default function ChatPage() {
                     <HeaderCustomButton
                       imageUrl={resolvedHeaderCustomImage}
                       href={resolvedHeaderCustomUrl}
+                      samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
                     />
                   </div>
                 ) : null}
@@ -1299,6 +1870,11 @@ export default function ChatPage() {
           pcTitleColor={pcTitleColor}
           mobileTitleColor={mobileTitleColor}
           behavior={behavior}
+          conversationSettings={conversationSettings}
+          channelToken={channelToken}
+          samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
+          feedbackEnabled={behavior.feedbackEnabled === true}
+          onFeedbackSubmitted={handleFeedbackSubmitted}
           isEmbed={isEmbed}
           defaultUserRadius={defaultUserRadius}
           defaultAgentRadius={defaultAgentRadius}
@@ -1323,6 +1899,11 @@ function ChatThreadView({
   pcTitleColor,
   mobileTitleColor,
   behavior,
+  conversationSettings,
+  channelToken,
+  samePageNavigationUrlAllowlist,
+  feedbackEnabled,
+  onFeedbackSubmitted,
   isEmbed,
   defaultUserRadius,
   defaultAgentRadius,
@@ -1339,6 +1920,11 @@ function ChatThreadView({
   pcTitleColor: string
   mobileTitleColor: string
   behavior: BehaviorCfg
+  conversationSettings: ConversationSettingsConfig
+  channelToken: string
+  samePageNavigationUrlAllowlist: readonly string[]
+  feedbackEnabled: boolean
+  onFeedbackSubmitted: (messageId: string, feedback: StepFeedbackResponse) => void
   isEmbed: boolean
   defaultUserRadius: string
   defaultAgentRadius: string
@@ -1350,6 +1936,18 @@ function ChatThreadView({
     onNew,
     onCancel,
   })
+  const visibleWelcomeBlocks = useMemo(() => {
+    const welcome = conversationSettings.welcome_message
+    if (!welcome.enabled) return []
+    return welcome.blocks.filter(isValidWelcomeBlock)
+  }, [conversationSettings])
+  const showWelcomeMessage = visibleWelcomeBlocks.length > 0
+  const visibleAIDisclaimer = useMemo(() => {
+    const disclaimer = conversationSettings.ai_disclaimer
+    const content = disclaimer.content.trim()
+    if (!disclaimer.enabled || !content) return ''
+    return content
+  }, [conversationSettings])
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -1364,43 +1962,61 @@ function ChatThreadView({
           className="flex min-h-0 flex-1 flex-col overflow-y-auto"
           style={{ backgroundColor: appearance.messageAreaBgColor || (isEmbed ? '#FFFFFF' : '#FAFAFA') }}
         >
-            {/* ── Empty state: centered logo + title ── */}
+            {/* ── Empty state: welcome message or centered logo + title ── */}
             <AuiIf condition={(s) => s.thread.isEmpty}>
-              <div className="flex min-h-full w-full flex-col items-center justify-center px-4 pb-6">
-                {isEmbed ? (
-                  <BrandEmptyState
-                    logoSrc={mobileEmptyStateImage}
-                    titleText={titleText}
-                    titleColor={mobileTitleColor}
-                    isEmbed={true}
-                  />
-                ) : (
-                  <>
-                    <div className="flex md:hidden">
-                      <BrandEmptyState
-                        logoSrc={mobileEmptyStateImage}
-                        titleText={titleText}
-                        titleColor={mobileTitleColor}
-                        isEmbed={false}
+              {showWelcomeMessage ? (
+                <>
+                  <div className={cn(
+                    'w-full shrink-0',
+                    isEmbed ? 'px-4 pb-5 pt-4' : 'px-4 pb-6 pt-6 md:px-0',
+                  )}>
+                    <div className={cn('mx-auto w-full', isEmbed ? '' : 'max-w-[740px]')}>
+                      <ChatWelcomeMessage
+                        blocks={visibleWelcomeBlocks}
+                        appearance={appearance}
+                        isEmbed={isEmbed}
+                        defaultRadius={defaultAgentRadius}
+                        samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
                       />
                     </div>
-                    <div className="hidden md:flex">
-                      <BrandEmptyState
-                        logoSrc={pcEmptyStateImage}
-                        titleText={titleText}
-                        titleColor={pcTitleColor}
-                        isEmbed={false}
-                      />
-                    </div>
-                  </>
-                )}
-              </div>
+                  </div>
+                  <div className="min-h-6 grow" />
+                </>
+              ) : (
+                <div className="flex min-h-full w-full flex-col items-center justify-center px-4 pb-6">
+                  {isEmbed ? (
+                    <BrandEmptyState
+                      logoSrc={mobileEmptyStateImage}
+                      titleText={titleText}
+                      titleColor={mobileTitleColor}
+                      isEmbed={true}
+                    />
+                  ) : (
+                    <>
+                      <div className="flex md:hidden">
+                        <BrandEmptyState
+                          logoSrc={mobileEmptyStateImage}
+                          titleText={titleText}
+                          titleColor={mobileTitleColor}
+                          isEmbed={false}
+                        />
+                      </div>
+                      <div className="hidden md:flex">
+                        <BrandEmptyState
+                          logoSrc={pcEmptyStateImage}
+                          titleText={titleText}
+                          titleColor={pcTitleColor}
+                          isEmbed={false}
+                        />
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
             </AuiIf>
 
             {/* ── Has messages: message list ── */}
             <AuiIf condition={(s) => !s.thread.isEmpty}>
-              <div className="min-h-6 grow" />
-
               <div className={cn(
                 'mx-auto w-full',
                 isEmbed ? 'px-4 pb-5 pt-4' : 'max-w-[740px] px-4 pb-6 pt-6 md:px-0',
@@ -1424,6 +2040,11 @@ function ChatThreadView({
                         <ChatAssistantMessage
                           message={original}
                           appearance={appearance}
+                          channelToken={channelToken}
+                          samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
+                          feedbackEnabled={feedbackEnabled}
+                          aiDisclaimer={visibleAIDisclaimer}
+                          onFeedbackSubmitted={onFeedbackSubmitted}
                           isEmbed={isEmbed}
                           defaultRadius={defaultAgentRadius}
                         />
@@ -1432,6 +2053,8 @@ function ChatThreadView({
                   </ThreadPrimitive.Messages>
                 </div>
               </div>
+
+              <div className="min-h-6 grow" />
             </AuiIf>
 
           <ThreadPrimitive.ViewportFooter
@@ -1515,6 +2138,7 @@ function BrandEmptyState({
   titleColor: string
   isEmbed: boolean
 }) {
+  const hasLogo = Boolean(logoSrc)
   const hasTitle = Boolean(titleText)
   return (
     <div
@@ -1524,8 +2148,9 @@ function BrandEmptyState({
         hasTitle ? 'gap-4' : 'gap-0',
       )}
     >
-      {logoSrc ? (
+      {hasLogo ? (
         <img
+          key={logoSrc}
           src={logoSrc}
           alt=""
           className={cn(
@@ -1535,11 +2160,7 @@ function BrandEmptyState({
               : 'max-h-[min(42vh,360px)] md:max-h-[min(48vh,420px)]',
           )}
         />
-      ) : (
-        <div className="flex h-[60px] w-[60px] shrink-0 items-center justify-center rounded-xl bg-[#F5F5F5]">
-          <IconMessageChatbot size={32} className="text-[#A3A3A3]" />
-        </div>
-      )}
+      ) : null}
       {hasTitle ? (
         <span
           className={cn(
@@ -1551,6 +2172,92 @@ function BrandEmptyState({
           {titleText}
         </span>
       ) : null}
+    </div>
+  )
+}
+
+function ChatWelcomeMessage({
+  blocks,
+  appearance,
+  isEmbed,
+  defaultRadius,
+  samePageNavigationUrlAllowlist,
+}: {
+  blocks: WelcomeMessageBlock[]
+  appearance: AppearanceCfg
+  isEmbed: boolean
+  defaultRadius: string
+  samePageNavigationUrlAllowlist: readonly string[]
+}) {
+  const bubbleTextColor = appearance.agentBubbleTextColor || (isEmbed ? '#3F3F46' : '#1A1A1A')
+  const configuredAgentAvatar = (appearance.agentAvatar || '').trim()
+  const [agentAvatarFailed, setAgentAvatarFailed] = useState(false)
+  const showAgentAvatar = Boolean(configuredAgentAvatar) && !agentAvatarFailed
+
+  useEffect(() => {
+    setAgentAvatarFailed(false)
+  }, [configuredAgentAvatar])
+
+  return (
+    <div className={cn('flex w-full', showAgentAvatar && 'gap-2.5')}>
+      {showAgentAvatar ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={configuredAgentAvatar}
+          alt=""
+          aria-label="Agent avatar"
+          className="h-[38px] w-[38px] shrink-0 rounded-full object-cover"
+          onError={() => setAgentAvatarFailed(true)}
+        />
+      ) : null}
+
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
+        <div
+          className={cn(
+            'w-fit max-w-full min-w-0 self-start break-words',
+            '[&_p]:m-0 [&_p+p]:mt-2 [&_ul]:my-1 [&_ol]:my-1',
+            '[&>div]:min-h-[26px] [&>div]:leading-[26px]',
+            '[&_p]:leading-[26px] [&_li]:leading-[26px]',
+            isEmbed ? '[&>div]:text-[13px]' : '[&>div]:text-sm',
+            isEmbed ? '[&_.wmde-markdown]:!text-[13px]' : '[&_.wmde-markdown]:!text-sm',
+            '[&_.wmde-markdown]:!leading-[26px]',
+            '[&_.wmde-markdown_p]:!m-0',
+          )}
+          style={{
+            backgroundColor: appearance.agentBubbleBgColor || (isEmbed ? '#FFFFFF' : '#F5F5F5'),
+            color: bubbleTextColor,
+            borderColor: appearance.agentBubbleBorderColor || '#E5E5E5',
+            borderWidth: '1px',
+            borderStyle: 'solid',
+            borderRadius: parseRadius(appearance.agentBubbleRadius, defaultRadius),
+            padding: '10px 12px',
+          }}
+        >
+          <div className="space-y-3">
+            {blocks.map((block, index) =>
+              block.type === 'markdown' ? (
+                <MarkdownContent
+                  key={`welcome-md-${index}`}
+                  source={block.content}
+                  style={{ color: bubbleTextColor }}
+                  samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
+                />
+              ) : (
+                <WelcomeEmbedFrame
+                  key={`welcome-embed-${index}`}
+                  title={`welcome embed ${index + 1}`}
+                  embedCode={block.embed_code}
+                  className="block w-full rounded-lg border border-[#E4E4E7] bg-white"
+                  style={{
+                    height: block.height,
+                    maxHeight: isEmbed ? '45vh' : '520px',
+                  }}
+                />
+              ),
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1627,11 +2334,21 @@ function ChatUserMessage({
 function ChatAssistantMessage({
   message,
   appearance,
+  channelToken,
+  samePageNavigationUrlAllowlist,
+  feedbackEnabled,
+  aiDisclaimer,
+  onFeedbackSubmitted,
   isEmbed,
   defaultRadius,
 }: {
   message: ChatMessage
   appearance: AppearanceCfg
+  channelToken: string
+  samePageNavigationUrlAllowlist: readonly string[]
+  feedbackEnabled: boolean
+  aiDisclaimer: string
+  onFeedbackSubmitted: (messageId: string, feedback: StepFeedbackResponse) => void
   isEmbed: boolean
   defaultRadius: string
 }) {
@@ -1654,46 +2371,118 @@ function ChatAssistantMessage({
   const configuredAgentAvatar = (appearance.agentAvatar || '').trim()
   const [agentAvatarFailed, setAgentAvatarFailed] = useState(false)
   const showAgentAvatar = Boolean(configuredAgentAvatar) && !agentAvatarFailed
+  const [selectedFeedback, setSelectedFeedback] = useState<FeedbackRating | null>(
+    message.feedbackRating ?? null,
+  )
+  const [feedbackDraft, setFeedbackDraft] = useState(message.feedbackComment ?? '')
+  const [feedbackOpen, setFeedbackOpen] = useState(false)
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false)
+  const [feedbackError, setFeedbackError] = useState('')
+  const [feedbackSaved, setFeedbackSaved] = useState(false)
 
   useEffect(() => {
     setAgentAvatarFailed(false)
   }, [configuredAgentAvatar])
 
-  return (
-    <MessagePrimitive.Root
-      className={cn('group flex w-full', showAgentAvatar && 'gap-2.5')}
-    >
-      {showAgentAvatar ? (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={configuredAgentAvatar}
-          alt=""
-          aria-label="Agent avatar"
-          className="h-[38px] w-[38px] shrink-0 rounded-full object-cover"
-          onError={() => setAgentAvatarFailed(true)}
-        />
-      ) : null}
+  useEffect(() => {
+    setSelectedFeedback(message.feedbackRating ?? null)
+    setFeedbackDraft(message.feedbackComment ?? '')
+    setFeedbackError('')
+    setFeedbackSaved(false)
+    setFeedbackOpen(false)
+  }, [message.id, message.feedbackRating, message.feedbackComment])
 
-      <div className="flex min-w-0 flex-1 flex-col gap-2">
-        {message.retryStatus && (
-          // Sub-req 4: weak-network reconnect indicator. Sits above the
-          // streaming bubble area so users see it even when no partial
-          // content has rendered yet. Cleared on first delta / done / error.
-          <div
-            className={cn(
-              'flex w-fit items-center gap-1.5 self-start rounded-md border border-[#FCD34D] bg-[#FFFBEB] px-2 py-1',
-              isEmbed ? 'text-[11px]' : 'text-[12px]',
-            )}
-            style={{ color: '#92400E' }}
-            role="status"
-            aria-live="polite"
-          >
-            <IconLoader2 size={12} className="animate-spin" />
-            <span>
-              {`网络不稳，重连中 (${message.retryStatus.attempt}/${message.retryStatus.maxAttempts})`}
-            </span>
-          </div>
-        )}
+  const canShowFeedback =
+    feedbackEnabled &&
+    !message.isStreaming &&
+    Boolean(bottomTextTrimmed) &&
+    message.assistantStepId != null
+
+  const handleFeedbackSelect = (rating: FeedbackRating) => {
+    if (feedbackSubmitting) return
+    setSelectedFeedback(rating)
+    setFeedbackOpen(true)
+    setFeedbackError('')
+    setFeedbackSaved(false)
+  }
+
+  const handleFeedbackCancel = () => {
+    if (feedbackSubmitting) return
+    setSelectedFeedback(message.feedbackRating ?? null)
+    setFeedbackDraft(message.feedbackComment ?? '')
+    setFeedbackOpen(false)
+    setFeedbackError('')
+  }
+
+  const handleFeedbackSubmit = async () => {
+    if (!selectedFeedback || !message.assistantStepId) return
+    if (feedbackDraft.length > 500) {
+      setFeedbackError('评价内容不能超过 500 个字符')
+      return
+    }
+
+    setFeedbackSubmitting(true)
+    setFeedbackError('')
+    setFeedbackSaved(false)
+    try {
+      const feedback = await submitPublicStepFeedback(
+        channelToken,
+        message.assistantStepId,
+        {
+          rating: selectedFeedback,
+          comment: feedbackDraft.trim() || null,
+        },
+      )
+      onFeedbackSubmitted(message.id, feedback)
+      setSelectedFeedback(feedback.feedback_rating)
+      setFeedbackDraft(feedback.feedback_comment ?? '')
+      setFeedbackOpen(false)
+      setFeedbackSaved(true)
+      window.setTimeout(() => setFeedbackSaved(false), 1800)
+    } catch (err) {
+      const message = await getErrorMessage(err)
+      setFeedbackError(message || '提交失败，请重试')
+    } finally {
+      setFeedbackSubmitting(false)
+    }
+  }
+
+  return (
+    <>
+      <MessagePrimitive.Root
+        className={cn('group flex w-full', showAgentAvatar && 'gap-2.5')}
+      >
+        {showAgentAvatar ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={configuredAgentAvatar}
+            alt=""
+            aria-label="Agent avatar"
+            className="h-[38px] w-[38px] shrink-0 rounded-full object-cover"
+            onError={() => setAgentAvatarFailed(true)}
+          />
+        ) : null}
+
+        <div className="flex min-w-0 flex-1 flex-col gap-2">
+          {message.retryStatus && (
+            // Sub-req 4: weak-network reconnect indicator. Sits above the
+            // streaming bubble area so users see it even when no partial
+            // content has rendered yet. Cleared on first delta / done / error.
+            <div
+              className={cn(
+                'flex w-fit items-center gap-1.5 self-start rounded-md border border-[#FCD34D] bg-[#FFFBEB] px-2 py-1',
+                isEmbed ? 'text-[11px]' : 'text-[12px]',
+              )}
+              style={{ color: '#92400E' }}
+              role="status"
+              aria-live="polite"
+            >
+              <IconLoader2 size={12} className="animate-spin" />
+              <span>
+                {`网络不稳，重连中 (${message.retryStatus.attempt}/${message.retryStatus.maxAttempts})`}
+              </span>
+            </div>
+          )}
 
         {[
           ...message.thinkingBlocks.map(b => ({ type: 'thinking' as const, block: b, idx: b.timelineIndex ?? 0 })),
@@ -1708,7 +2497,13 @@ function ChatAssistantMessage({
               case 'tool':
                 return <ToolBlockUI key={entry.block.id} block={entry.block} />
               case 'content':
-                return <InlineContentUI key={entry.block.id} block={entry.block} />
+                return (
+                  <InlineContentUI
+                    key={entry.block.id}
+                    block={entry.block}
+                    samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
+                  />
+                )
             }
           })
         }
@@ -1741,6 +2536,7 @@ function ChatAssistantMessage({
                 source={bottomBlock!.content}
                 isStreaming={bottomBlock!.isStreaming}
                 style={{ color: bubbleTextColor }}
+                samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
               />
             ) : (
               message.isStreaming && (
@@ -1767,18 +2563,151 @@ function ChatAssistantMessage({
           </div>
         )}
 
+        {!message.isStreaming && bottomTextTrimmed && aiDisclaimer && (
+          <div
+            className={cn(
+              'flex max-w-full items-start gap-1.5 self-start whitespace-pre-wrap break-words leading-relaxed text-[#8A8A8A]',
+              isEmbed ? 'text-[11px]' : 'text-[12px]',
+            )}
+          >
+            <IconInfoCircle size={13} className="mt-[2px] shrink-0 text-[#A3A3A3]" />
+            <span className="min-w-0">{aiDisclaimer}</span>
+          </div>
+        )}
+
         {!message.isStreaming && bottomTextTrimmed && (
           <div className="mt-0.5 flex min-h-[18px] items-center gap-2 pb-0.5 text-[11px] text-[#A3A3A3]">
             {message.timestamp && <span>{message.timestamp}</span>}
-            <ActionBarPrimitive.Root hideWhenRunning className="flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100">
+            <ActionBarPrimitive.Root hideWhenRunning className="flex items-center gap-2">
               <ActionBarPrimitive.Copy className="group/copy flex items-center justify-center text-[#A3A3A3] transition-colors hover:text-[#71717A]">
                 <IconCopy size={12} className="group-data-[copied]/copy:hidden" />
                 <IconCheck size={12} className="hidden text-[#059669] group-data-[copied]/copy:block" />
               </ActionBarPrimitive.Copy>
+              {canShowFeedback && (
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    className={cn(
+                      'flex h-[18px] w-[18px] items-center justify-center rounded transition-colors hover:bg-black/5 disabled:opacity-50',
+                      selectedFeedback === 'like' ? 'text-[#8A8A8A]' : 'text-[#A3A3A3]',
+                    )}
+                    onClick={() => handleFeedbackSelect('like')}
+                    disabled={feedbackSubmitting}
+                    title="赞"
+                    aria-label="赞"
+                  >
+                    {selectedFeedback === 'like'
+                      ? <IconThumbUpFilled size={13} />
+                      : <IconThumbUp size={12} />}
+                  </button>
+                  <button
+                    type="button"
+                    className={cn(
+                      'flex h-[18px] w-[18px] items-center justify-center rounded transition-colors hover:bg-black/5 disabled:opacity-50',
+                      selectedFeedback === 'dislike' ? 'text-[#8A8A8A]' : 'text-[#A3A3A3]',
+                    )}
+                    onClick={() => handleFeedbackSelect('dislike')}
+                    disabled={feedbackSubmitting}
+                    title="踩"
+                    aria-label="踩"
+                  >
+                    {selectedFeedback === 'dislike'
+                      ? <IconThumbDownFilled size={13} />
+                      : <IconThumbDown size={12} />}
+                  </button>
+                  {feedbackSaved && (
+                    <span className="text-[#059669]">已提交</span>
+                  )}
+                </div>
+              )}
             </ActionBarPrimitive.Root>
           </div>
         )}
-      </div>
-    </MessagePrimitive.Root>
+
+        </div>
+      </MessagePrimitive.Root>
+
+      {canShowFeedback && feedbackOpen && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 px-4 py-6"
+          role="dialog"
+          aria-modal="true"
+          aria-label="提交评价"
+          onClick={handleFeedbackCancel}
+        >
+          <div
+            className="w-full max-w-[420px] rounded-xl border border-[#E5E5E5] bg-white p-4 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-base font-semibold text-[#18181B]">提交评价</h3>
+                  <span
+                    className="flex h-7 w-7 items-center justify-center rounded-md text-[#8A8A8A]"
+                    aria-label={selectedFeedback === 'like' ? '已选赞' : '已选踩'}
+                  >
+                    {selectedFeedback === 'like'
+                      ? <IconThumbUpFilled size={18} />
+                      : <IconThumbDownFilled size={18} />}
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[#A3A3A3] transition-colors hover:bg-[#F4F4F5] hover:text-[#525252] disabled:opacity-50"
+                onClick={handleFeedbackCancel}
+                disabled={feedbackSubmitting}
+                aria-label="关闭评价弹窗"
+              >
+                <IconX size={16} />
+              </button>
+            </div>
+
+            <textarea
+              value={feedbackDraft}
+              onChange={(e) => {
+                setFeedbackDraft(e.target.value)
+                if (feedbackError) setFeedbackError('')
+              }}
+              placeholder="请输入您的评价..."
+              className="mt-4 min-h-[108px] w-full resize-none rounded-md border border-[#E5E5E5] bg-[#FAFAFA] px-3 py-2 text-[13px] leading-relaxed text-[#18181B] outline-none placeholder:text-[#A3A3A3] focus:border-[#A1A1AA]"
+              disabled={feedbackSubmitting}
+              autoFocus
+            />
+            <div className="mt-2 flex items-center gap-2">
+              <span
+                className={cn(
+                  'min-w-0 flex-1 text-[12px]',
+                  feedbackError ? 'text-[#DC2626]' : 'text-[#A3A3A3]',
+                )}
+              >
+                {feedbackError || `${feedbackDraft.length}/500`}
+              </span>
+              <button
+                type="button"
+                className="rounded-md border border-[#E5E5E5] bg-white px-3 py-1.5 text-[13px] text-[#525252] transition-colors hover:bg-[#F7F7F7] disabled:opacity-50"
+                onClick={handleFeedbackCancel}
+                disabled={feedbackSubmitting}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="rounded-md px-3 py-1.5 text-[13px] font-medium transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                style={{
+                  backgroundColor: appearance.sendMessageButtonBgColor || '#1A1A1A',
+                  color: appearance.sendMessageButtonIconColor || '#FFFFFF',
+                }}
+                onClick={handleFeedbackSubmit}
+                disabled={!selectedFeedback || feedbackSubmitting}
+              >
+                {feedbackSubmitting ? '提交中...' : '提交'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   )
 }

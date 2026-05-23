@@ -24,14 +24,18 @@ from app.schemas.channel import (
     EmbedTokenResponse,
     PublicChannelResponse,
 )
-from app.schemas.chat import ChatRequest
+from app.schemas.agent import EngineConfig
+from app.schemas.chat import ChatCancelRequest, ChatRequest
 from app.schemas.conversation import ConversationResponse
-from app.schemas.conversation_step import ConversationTimelineResponse
+from app.schemas.conversation_step import (
+    ConversationTimelineResponse,
+    StepFeedbackResponse,
+    StepFeedbackSubmit,
+)
 from app.schemas.telemetry import TelemetryBatchRequest, TelemetryBatchResponse
-from app.routers.v1.sse import with_sse_heartbeat
-from app.services.agent_engine_service import AgentEngineService
 from app.services.agent_service import AgentService
 from app.services.channel_service import ChannelService
+from app.services.detached_chat_stream_service import DetachedChatStreamService
 from app.repositories.conversation_repository import ConversationRepository
 from app.services.conversation_step_service import ConversationStepService
 from app.services.telemetry_service import TelemetryService
@@ -51,7 +55,18 @@ async def get_public_channel(
     Returns ``PublicChannelResponse`` which intentionally **omits** ``secret_key``
     and ``tenant_id`` so the browser-facing SDK / chat page never sees them.
     """
-    return await ChannelService.get_by_token(db, token)
+    channel = await ChannelService.get_by_token(db, token)
+    response = PublicChannelResponse.model_validate(channel)
+
+    if not channel.agent_id:
+        return response
+
+    agent = await AgentService.get_by_id(db, channel.agent_id)
+    engine_config = EngineConfig(
+        **{**EngineConfig().model_dump(), **(agent.engine_config or {})}
+    )
+    response.conversation_settings = engine_config.conversation_settings
+    return response
 
 
 @router.post(
@@ -85,7 +100,7 @@ async def sign_embed_token_endpoint(
         email=body.email,
         phone=body.phone,
         avatar_url=body.avatar_url,
-        source=body.source,
+        source="websdk",
         title=body.title,
         metadata=body.metadata,
         ttl=body.ttl,
@@ -97,7 +112,6 @@ async def sign_embed_token_endpoint(
 async def public_chat(
     token: str,
     body: ChatRequest,
-    request: Request,
     embed_token: str | None = None,
     db: AsyncSession = Depends(get_db),
 ):
@@ -113,7 +127,15 @@ async def public_chat(
 
     agent = await AgentService.get_by_id(db, channel.agent_id)
 
-    # Resolve customer context: embed_token > body.customer_context > None
+    body_customer_context = (
+        body.customer_context.model_dump(exclude_none=True)
+        if body.customer_context
+        else None
+    )
+
+    # Resolve customer context: embed_token > body.customer_context > None.
+    # The URL `test` flag is client-visible request context, so preserve it
+    # even when identity/profile fields come from a signed embed token.
     customer_context: dict | None = None
     if embed_token and channel.secret_key:
         payload = verify_embed_token(channel.secret_key, embed_token)
@@ -125,8 +147,20 @@ async def public_chat(
         ):
             if key in payload and payload[key] is not None:
                 customer_context[key] = payload[key]
-    elif body.customer_context:
-        customer_context = body.customer_context.model_dump(exclude_none=True)
+        if body_customer_context:
+            if body_customer_context.get("is_test") is True:
+                customer_context["is_test"] = True
+            if body_customer_context.get("channel_source") is not None:
+                customer_context["channel_source"] = body_customer_context[
+                    "channel_source"
+                ]
+    elif body_customer_context:
+        customer_context = body_customer_context
+
+    if customer_context is None:
+        customer_context = {}
+    customer_context["source"] = "websdk"
+    customer_context["channel_id"] = channel.id
 
     trace_id = set_trace_id()
     set_request_id(body.request_id)
@@ -149,20 +183,17 @@ async def public_chat(
 
     async def event_generator():
         try:
-            stream = AgentEngineService.run_chat_round(
-                db,
+            stream = DetachedChatStreamService.stream_public_chat(
+                channel_token=token,
                 agent_id=agent.id,
                 user_message=body.message,
                 conversation_id=body.conversation_id,
                 customer_context=customer_context,
                 resume=body.resume,
-                # Engine polls this between LLM stream attempts so we don't burn
-                # tokens retrying for a client that already closed the SSE.
-                is_disconnected_cb=request.is_disconnected,
                 client_message_id=body.client_message_id,
                 last_event_id=body.last_event_id,
             )
-            async for event in with_sse_heartbeat(stream):
+            async for event in stream:
                 yield event
         except Exception as e:
             logger.exception("Public chat stream error")
@@ -180,6 +211,30 @@ async def public_chat(
             "X-Trace-Id": trace_id,
         },
     )
+
+
+@router.post("/channels/{token}/chat/cancel")
+async def cancel_public_chat(
+    token: str,
+    body: ChatCancelRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Explicitly cancel a running public Web SDK chat turn.
+
+    Plain SSE disconnects are treated as transport loss and the backend round
+    keeps running. This endpoint is only used by the explicit "stop response"
+    action; new-chat and switch-conversation detach from the stream without
+    cancelling the backend round.
+    """
+    channel = await ChannelService.get_by_token(db, token)
+    if not channel.agent_id:
+        raise NotFoundError("Channel has no agent bound")
+
+    cancelled = await DetachedChatStreamService.cancel_public_chat(
+        channel_token=token,
+        client_message_id=body.client_message_id,
+    )
+    return {"cancelled": cancelled}
 
 
 @router.get(
@@ -238,6 +293,26 @@ async def get_public_conversation_steps(
     # was intentionally discarded by the resume protocol.
     return await ConversationStepService.get_timeline(
         db, conversation_id, include_incomplete=False,
+    )
+
+
+@router.post(
+    "/channels/{token}/steps/{step_id}/feedback",
+    response_model=StepFeedbackResponse,
+)
+async def submit_public_step_feedback(
+    token: str,
+    step_id: int,
+    body: StepFeedbackSubmit,
+    db: AsyncSession = Depends(get_db),
+):
+    """Submit or overwrite visitor feedback for one assistant reply step."""
+    channel = await ChannelService.get_by_token(db, token)
+    return await ConversationStepService.submit_public_feedback(
+        db,
+        channel=channel,
+        step_id=step_id,
+        data=body,
     )
 
 

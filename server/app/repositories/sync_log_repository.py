@@ -1,6 +1,8 @@
 """
 SyncLog repository
 """
+from datetime import datetime
+
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,3 +61,51 @@ class SyncLogRepository:
             .limit(per_page)
         )
         return list(result.scalars().all()), total
+
+    @staticmethod
+    async def has_running(db: AsyncSession, kb_id: int) -> bool:
+        result = await db.execute(
+            select(func.count())
+            .select_from(SyncLog)
+            .where(
+                SyncLog.knowledge_base_id == kb_id,
+                SyncLog.status == "running",
+            )
+        )
+        return bool(result.scalar_one())
+
+    @staticmethod
+    async def get_latest_running(db: AsyncSession, kb_id: int) -> SyncLog | None:
+        result = await db.execute(
+            select(SyncLog)
+            .where(
+                SyncLog.knowledge_base_id == kb_id,
+                SyncLog.status == "running",
+            )
+            .order_by(SyncLog.started_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def cancel_stale_running(
+        db: AsyncSession, kb_id: int, *, reason: str
+    ) -> int:
+        """Mark orphaned ``running`` rows failed before starting a new job."""
+        result = await db.execute(
+            select(SyncLog).where(
+                SyncLog.knowledge_base_id == kb_id,
+                SyncLog.status == "running",
+            )
+        )
+        rows = list(result.scalars().all())
+        now = datetime.utcnow()
+        for log in rows:
+            await SyncLogRepository.update(db, log, {
+                "status": "failed",
+                "finished_at": now,
+                "details": {"error": reason, "sync_mode": "unknown"},
+            })
+        if rows:
+            await db.flush()
+        return len(rows)

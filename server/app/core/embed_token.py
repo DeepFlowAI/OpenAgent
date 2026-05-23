@@ -24,7 +24,7 @@ def sign_embed_token(
     email: str | None = None,
     phone: str | None = None,
     avatar_url: str | None = None,
-    source: str = "embed",
+    source: str = "websdk",
     title: str | None = None,
     metadata: dict | None = None,
     ttl: int = DEFAULT_TTL_SECONDS,

@@ -4,12 +4,14 @@ import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react
 import { useParams, useRouter } from 'next/navigation'
 import { useAgentTool, useUpdateAgentTool } from '@/service/use-agent-tool'
 import { useKnowledgeBases, useKBMetaFields, useKBMetaSchema } from '@/service/use-knowledge-base'
+import { useServiceHoursList } from '@/service/use-service-hours'
 import type { FieldDefinition } from '@/service/use-knowledge-base'
 import { useAuthStore } from '@/context/auth-store'
 import { useToast } from '@/app/components/base/toast'
 import { getErrorMessage } from '@/service/base'
 import { Switch } from '@/app/components/base/switch'
-import type { AgentTool } from '@/models/agent-tool'
+import type { AgentTool, UpdateAgentToolPayload } from '@/models/agent-tool'
+import type { ServiceHours } from '@/models/service-hours'
 import {
   IconArrowLeft,
   IconFileText,
@@ -192,6 +194,7 @@ const DOC_ONLY_LEVEL_OPTIONS = [
 const PAGE_TITLE_MAP: Partial<Record<AgentTool['tool_type'], string>> = {
   search: '搜索工具配置',
   doc_query: '文档查询工具配置',
+  human_handoff: '转人工工具配置',
 }
 
 const INPUT_CLS =
@@ -994,11 +997,125 @@ function buildSearchParametersPreview(dims: FilterDimensions): Record<string, un
   return schema
 }
 
+type HumanRouteFieldKey = 'agent_group_id' | 'agent_id' | 'business_type'
+type HumanRouteFields = Record<HumanRouteFieldKey, boolean>
+
+const HUMAN_ROUTE_FIELD_DEFAULTS: HumanRouteFields = {
+  agent_group_id: true,
+  agent_id: false,
+  business_type: true,
+}
+
+const HUMAN_ROUTE_FIELD_LABELS: {
+  key: HumanRouteFieldKey
+  label: string
+  hint: string
+}[] = [
+  {
+    key: 'agent_group_id',
+    label: '允许 LLM 传入客服组（agent_group_id）',
+    hint: '用于指定目标客服组 ID。',
+  },
+  {
+    key: 'agent_id',
+    label: '允许 LLM 传入指定客服（agent_id）',
+    hint: '用于指定坐席 ID，不是当前 AI Agent ID。',
+  },
+  {
+    key: 'business_type',
+    label: '允许 LLM 传入业务类型（business_type）',
+    hint: '供客服系统按业务线、场景或队列判断转接方向。',
+  },
+]
+
+function getHumanRouteFields(config: Record<string, unknown>): HumanRouteFields {
+  const routeFields = cfgRecord(config, 'route_fields')
+  return {
+    agent_group_id: cfgBool(routeFields, 'agent_group_id', HUMAN_ROUTE_FIELD_DEFAULTS.agent_group_id),
+    agent_id: cfgBool(routeFields, 'agent_id', HUMAN_ROUTE_FIELD_DEFAULTS.agent_id),
+    business_type: cfgBool(routeFields, 'business_type', HUMAN_ROUTE_FIELD_DEFAULTS.business_type),
+  }
+}
+
+function getHumanServiceHoursId(config: Record<string, unknown>): number | null {
+  const value = config.service_hours_id
+  if (typeof value === 'number' && value > 0) return value
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value)
+    return parsed > 0 ? parsed : null
+  }
+  return null
+}
+
+function normalizeHumanHandoffConfig(config: Record<string, unknown>): Record<string, unknown> {
+  return {
+    service_hours_id: getHumanServiceHoursId(config),
+    route_fields: getHumanRouteFields(config),
+  }
+}
+
+function buildHumanHandoffParametersPreview(config: Record<string, unknown>): Record<string, unknown> {
+  const routeFields = getHumanRouteFields(config)
+  const properties: Record<string, unknown> = {
+    brief: {
+      type: 'string',
+      description: 'One-line summary for session log display.',
+      maxLength: 200,
+    },
+    reason: {
+      type: 'string',
+      description: 'Reason for requesting a human handoff, for support staff and audit.',
+      maxLength: 1000,
+    },
+    urgency: {
+      type: 'string',
+      enum: ['normal', 'high'],
+      description: 'Priority hint. Use normal unless the user clearly needs urgent handling.',
+    },
+    user_message: {
+      type: 'string',
+      description: 'Original user message excerpt or short summary for human support.',
+      maxLength: 1000,
+    },
+  }
+
+  if (routeFields.agent_group_id) {
+    properties.agent_group_id = {
+      type: 'string',
+      description: 'Target human support group ID.',
+      maxLength: 128,
+    }
+  }
+  if (routeFields.agent_id) {
+    properties.agent_id = {
+      type: 'string',
+      description: 'Target human support agent ID, not the AI Agent ID.',
+      maxLength: 128,
+    }
+  }
+  if (routeFields.business_type) {
+    properties.business_type = {
+      type: 'string',
+      description: 'Business line or routing type, such as complaint, after-sales, or technical support.',
+      maxLength: 128,
+    }
+  }
+
+  return {
+    type: 'object',
+    properties,
+    required: ['brief', 'reason'],
+    additionalProperties: false,
+  }
+}
+
 function BasicInfoSection({
   name,
   description,
   parametersSchema,
   isSearch,
+  nameReadOnly,
+  hideParameters,
   filterDimensions,
   onFilterDimensionsChange,
   onNameChange,
@@ -1008,6 +1125,8 @@ function BasicInfoSection({
   description: string
   parametersSchema: Record<string, unknown> | null
   isSearch?: boolean
+  nameReadOnly?: boolean
+  hideParameters?: boolean
   filterDimensions?: FilterDimensions
   onFilterDimensionsChange?: (dims: FilterDimensions) => void
   onNameChange: (v: string) => void
@@ -1027,11 +1146,12 @@ function BasicInfoSection({
           type="text"
           value={name}
           onChange={(e) => onNameChange(e.target.value)}
+          disabled={nameReadOnly}
           placeholder="tool_name"
           maxLength={128}
-          className={INPUT_CLS}
+          className={`${INPUT_CLS} ${nameReadOnly ? 'bg-[#FAFAFA] text-[#71717A]' : ''}`}
         />
-        <FieldHint>工具名称，供 LLM function call 时指定</FieldHint>
+        <FieldHint>{nameReadOnly ? '系统工具固定名称，不可编辑' : '工具名称，供 LLM function call 时指定'}</FieldHint>
       </div>
       <div>
         <FieldLabel>description</FieldLabel>
@@ -1067,11 +1187,102 @@ function BasicInfoSection({
         </div>
       )}
 
+      {!hideParameters && (
+        <div>
+          <FieldLabel>parameters (只读，自动生成)</FieldLabel>
+          <div className="min-h-[120px] rounded-lg border border-[#E4E4E7] bg-[#FAFAFA] p-4">
+            <pre className="whitespace-pre-wrap font-mono text-xs text-[#18181B]">
+              {previewSchema ? JSON.stringify(previewSchema, null, 2) : '暂无'}
+            </pre>
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function HumanHandoffSettingsSection({
+  config,
+  onConfigChange,
+  serviceHours,
+}: {
+  config: Record<string, unknown>
+  onConfigChange: (c: Record<string, unknown>) => void
+  serviceHours: ServiceHours[]
+}) {
+  const routeFields = getHumanRouteFields(config)
+  const serviceHoursId = getHumanServiceHoursId(config)
+  const previewSchema = useMemo(
+    () => buildHumanHandoffParametersPreview(config),
+    [config],
+  )
+
+  const updateRouteField = (key: HumanRouteFieldKey, checked: boolean) => {
+    onConfigChange({
+      ...normalizeHumanHandoffConfig(config),
+      route_fields: { ...routeFields, [key]: checked },
+    })
+  }
+
+  return (
+    <section className="space-y-4">
+      <SectionHeader icon={<IconSettings size={20} />} title="转人工设置" />
+
+      <div>
+        <FieldLabel>服务时间绑定</FieldLabel>
+        <div className="relative">
+          <select
+            value={serviceHoursId ?? 0}
+            onChange={(e) => {
+              const nextId = Number(e.target.value)
+              onConfigChange({
+                ...normalizeHumanHandoffConfig(config),
+                service_hours_id: nextId > 0 ? nextId : null,
+              })
+            }}
+            className={`${INPUT_CLS} appearance-none pr-9`}
+          >
+            <option value={0}>不绑定服务时间</option>
+            {serviceHours.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+          <IconChevronDown
+            size={16}
+            className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#A1A1AA]"
+          />
+        </div>
+        <FieldHint>绑定后，仅服务时间内会向 API 会话暴露此工具。</FieldHint>
+      </div>
+
+      <div className="space-y-3">
+        <FieldLabel>LLM 可传入的路由字段</FieldLabel>
+        <DescriptionText>
+          开启后，自动生成的 parameters 会包含对应路由字段；关闭后 LLM 无法在 function call 中传入该维度。
+        </DescriptionText>
+        <div className="flex flex-col gap-3">
+          {HUMAN_ROUTE_FIELD_LABELS.map((item) => (
+            <label key={item.key} className="flex items-start gap-3">
+              <Switch
+                checked={routeFields[item.key]}
+                onChange={(checked) => updateRouteField(item.key, checked)}
+              />
+              <span className="min-w-0">
+                <span className="block text-sm text-[#18181B]">{item.label}</span>
+                <span className="mt-0.5 block text-xs leading-5 text-[#A1A1AA]">{item.hint}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+      </div>
+
       <div>
         <FieldLabel>parameters (只读，自动生成)</FieldLabel>
-        <div className="min-h-[120px] rounded-lg border border-[#E4E4E7] bg-[#FAFAFA] p-4">
+        <div className="min-h-[160px] rounded-lg border border-[#E4E4E7] bg-[#FAFAFA] p-4">
           <pre className="whitespace-pre-wrap font-mono text-xs text-[#18181B]">
-            {previewSchema ? JSON.stringify(previewSchema, null, 2) : '暂无'}
+            {JSON.stringify(previewSchema, null, 2)}
           </pre>
         </div>
       </div>
@@ -1670,13 +1881,17 @@ export default function ToolDetailPage() {
   const { data: kbList } = useKnowledgeBases(tenantId, { per_page: 20 })
   const { data: metaFields } = useKBMetaFields(selectedKbId)
   const { data: metaSchema } = useKBMetaSchema(selectedKbId)
+  const { data: serviceHoursList } = useServiceHoursList({ per_page: 100 })
 
   // Deep clone config on init to avoid mutating cached query data
   useEffect(() => {
     if (tool && !initialized) {
       setName(tool.name)
       setDescription(tool.description ?? '')
-      const cloned = JSON.parse(JSON.stringify(tool.config ?? {}))
+      let cloned = JSON.parse(JSON.stringify(tool.config ?? {}))
+      if (tool.tool_type === 'human_handoff') {
+        cloned = normalizeHumanHandoffConfig(cloned)
+      }
       setConfig(cloned)
       if (tool.tool_type === 'search' && cloned.filter_dimensions) {
         const fd = cloned.filter_dimensions as Record<string, unknown>
@@ -1706,19 +1921,22 @@ export default function ToolDetailPage() {
 
   const handleSave = useCallback(async () => {
     try {
+      const data: UpdateAgentToolPayload = {
+        description: description.trim() || undefined,
+        config,
+      }
+      if (tool?.tool_type !== 'human_handoff') {
+        data.name = name.trim()
+      }
       await updateMutation.mutateAsync({
         toolId,
-        data: {
-          name: name.trim(),
-          description: description.trim() || undefined,
-          config,
-        },
+        data,
       })
       toast('保存成功', 'success')
     } catch (err) {
       toast(await getErrorMessage(err), 'error')
     }
-  }, [toolId, name, description, config, updateMutation, toast])
+  }, [toolId, tool, name, description, config, updateMutation, toast])
 
   if (isLoading || !tool) {
     return (
@@ -1732,7 +1950,8 @@ export default function ToolDetailPage() {
   const isSearch = tool.tool_type === 'search'
   const isDocQuery = tool.tool_type === 'doc_query'
   const isPythonCode = tool.tool_type === 'python_code'
-  const showPlaceholder = !isSearch && !isDocQuery && !isPythonCode
+  const isHumanHandoff = tool.tool_type === 'human_handoff'
+  const showPlaceholder = !isSearch && !isDocQuery && !isPythonCode && !isHumanHandoff
 
   return (
     <div className="flex h-full flex-col">
@@ -1815,6 +2034,27 @@ export default function ToolDetailPage() {
                 onConfigChange={setConfig}
                 metaFields={metaFields}
                 metaSchema={metaSchema}
+              />
+            </>
+          )}
+
+          {/* ── Human Handoff System Tool ── */}
+          {isHumanHandoff && (
+            <>
+              <BasicInfoSection
+                name={name}
+                description={description}
+                parametersSchema={null}
+                nameReadOnly
+                hideParameters
+                onNameChange={setName}
+                onDescriptionChange={setDescription}
+              />
+              <SectionDivider />
+              <HumanHandoffSettingsSection
+                config={config}
+                onConfigChange={setConfig}
+                serviceHours={serviceHoursList?.items ?? []}
               />
             </>
           )}

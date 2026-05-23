@@ -1,3 +1,9 @@
+import type { ConversationSettingsConfig } from '@/models/agent'
+
+export type ChannelConfig = Record<string, unknown> & {
+  samePageNavigationUrlAllowlist?: string[]
+}
+
 export type Channel = {
   id: number
   tenant_id: string
@@ -8,7 +14,7 @@ export type Channel = {
   agent_id: number | null
   access_mode: string
   secret_key: string | null
-  config: Record<string, unknown>
+  config: ChannelConfig
   created_at: string
   updated_at: string
 }
@@ -24,7 +30,8 @@ export type PublicChannel = {
   channel_type: string
   agent_id: number | null
   access_mode: string
-  config: Record<string, unknown>
+  config: ChannelConfig
+  conversation_settings: ConversationSettingsConfig
   created_at: string
   updated_at: string
 }
@@ -36,7 +43,7 @@ export type CreateChannelPayload = {
   channel_type?: string
   agent_id?: number | null
   access_mode?: string
-  config?: Record<string, unknown>
+  config?: ChannelConfig
 }
 
 export type UpdateChannelPayload = {
@@ -44,5 +51,5 @@ export type UpdateChannelPayload = {
   description?: string | null
   agent_id?: number | null
   access_mode?: string
-  config?: Record<string, unknown>
+  config?: ChannelConfig
 }

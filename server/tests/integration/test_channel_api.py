@@ -95,6 +95,59 @@ class TestChannelAPI:
         assert resp.json()["access_mode"] == "embed"
 
     @pytest.mark.asyncio
+    async def test_update_channel_same_page_allowlist_normalizes_patterns(
+        self, client: AsyncClient
+    ):
+        name = _unique("ch-allowlist")
+        create_resp = await client.post(
+            "/api/v1/channels",
+            json={"name": name},
+            headers=HEADERS,
+        )
+        channel_id = create_resp.json()["id"]
+
+        resp = await client.put(
+            f"/api/v1/channels/{channel_id}",
+            json={
+                "config": {
+                    "samePageNavigationUrlAllowlist": [
+                        "  HTTPS://Login.EXAMPLE.com/*  ",
+                        "",
+                        "https://login.example.com/*",
+                        "https://*.example.com/oauth/*",
+                    ]
+                }
+            },
+            headers=HEADERS,
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["config"]["samePageNavigationUrlAllowlist"] == [
+            "https://login.example.com/*",
+            "https://*.example.com/oauth/*",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_update_channel_same_page_allowlist_rejects_invalid_patterns(
+        self, client: AsyncClient
+    ):
+        name = _unique("ch-allowlist-invalid")
+        create_resp = await client.post(
+            "/api/v1/channels",
+            json={"name": name},
+            headers=HEADERS,
+        )
+        channel_id = create_resp.json()["id"]
+
+        for pattern in ["https://*", "javascript:*"]:
+            resp = await client.put(
+                f"/api/v1/channels/{channel_id}",
+                json={"config": {"samePageNavigationUrlAllowlist": [pattern]}},
+                headers=HEADERS,
+            )
+            assert resp.status_code == 422
+
+    @pytest.mark.asyncio
     async def test_delete_channel_returns_200(self, client: AsyncClient):
         name = _unique("ch-delete")
         create_resp = await client.post(
