@@ -153,3 +153,29 @@ class TestHasAnyMultiValue:
         sql = _compile(clause)
         assert "'优先参考产品'" in sql
         assert "@>" in sql
+
+
+class TestInMultiValue:
+    """`enum` console fixed_filters should treat CSV strings as multiple candidates."""
+
+    def test_normalize_splits_csv_for_in(self):
+        node = FilterNode(
+            field="recommendation_tier",
+            op="in",
+            value="priority_reference,recommended",
+        )
+        out = normalize_filter_node(node)
+        assert out.op == "in"
+        assert out.value == ["priority_reference", "recommended"]
+
+    def test_in_csv_compiles_to_membership_candidates(self):
+        node = FilterNode(
+            field="recommendation_tier",
+            op="in",
+            value="priority_reference,recommended",
+        )
+        clause = SearchRepository._build_filter_condition(Slice.doc_meta, node)
+        sql = _compile(clause)
+        assert "'priority_reference'" in sql
+        assert "'recommended'" in sql
+        assert "'priority_reference,recommended'" not in sql

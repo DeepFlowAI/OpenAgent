@@ -17,7 +17,7 @@ def _error(code: str, message: str) -> str:
 
 
 class HumanHandoffToolExecutor(BaseToolExecutor):
-    """Validate a human handoff request and return a model-readable result."""
+    """Validate a human handoff request without completing it in-process."""
 
     async def execute(self, args: dict, config: dict, ctx: ToolContext) -> str:
         conversation = await ConversationRepository.get_by_id(
@@ -42,11 +42,10 @@ class HumanHandoffToolExecutor(BaseToolExecutor):
             return _error("invalid_arguments", str(exc))
 
         return (
-            '<human_handoff_response status="recorded">'
+            '<human_handoff_response status="requires_action">'
             f"<brief>{escape(handoff['brief'])}</brief>"
             "<instruction>"
-            "The request has been recorded. Tell the user that follow-up has been logged, "
-            "and do not claim that a human agent has joined this chat in real time."
+            "Submit the final tool result through the conversation tool-results API."
             "</instruction>"
             "</human_handoff_response>"
         )

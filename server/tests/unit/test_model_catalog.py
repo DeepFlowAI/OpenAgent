@@ -6,6 +6,9 @@ def test_parse_llm_ui_models_default_catalog():
     models = parse_llm_ui_models("")
     assert len(models) >= 10
     assert models[0].value == "gpt-4o"
+    assert ("deepseek-v4-pro", "DeepSeek V4 Pro") in [
+        (m.value, m.label) for m in models
+    ]
 
 
 def test_parse_llm_ui_models_custom_entries():
@@ -59,3 +62,100 @@ def test_model_candidates_multi_channel_fallback(monkeypatch):
 
     candidates = litellm_client._model_candidates("kimi-k2.6")
     assert [c["channel"] for c in candidates] == ["aliyun-bailian", "openrouter"]
+
+
+def test_model_candidates_deepseek_prefers_official(monkeypatch):
+    monkeypatch.setattr(litellm_client.settings, "LLM_PROVIDER_CHANNELS", "")
+    monkeypatch.setattr(litellm_client.settings, "DEEPSEEK_API_KEY", "deepseek-key")
+    monkeypatch.setattr(
+        litellm_client.settings,
+        "DEEPSEEK_API_BASE_URL",
+        "https://api.deepseek.com",
+    )
+    monkeypatch.setattr(litellm_client.settings, "OPENROUTER_API_KEY", "or-key")
+
+    candidates = litellm_client._model_candidates("deepseek-v4-pro")
+
+    assert [c["channel"] for c in candidates] == ["deepseek-official", "openrouter"]
+    assert [c["model"] for c in candidates] == [
+        "openai/deepseek-v4-pro",
+        "openrouter/deepseek/deepseek-v4-pro",
+    ]
+    assert candidates[0]["api_key"] == "deepseek-key"
+    assert candidates[0]["api_base"] == "https://api.deepseek.com"
+
+
+def test_deepseek_thinking_request_params_preserve_reasoning_content():
+    candidate = {
+        "channel": "deepseek-official",
+        "model": "openai/deepseek-v4-pro",
+        "api_key": "deepseek-key",
+        "api_base": "https://api.deepseek.com",
+    }
+    kwargs = litellm_client._request_kwargs(
+        candidate,
+        messages=[
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "keep this",
+                "tool_calls": [],
+            }
+        ],
+        temperature=0.01,
+        top_p=0.85,
+        max_tokens=4096,
+        stream=False,
+    )
+    litellm_client._apply_thinking(
+        kwargs,
+        True,
+        candidate["model"],
+        candidate["channel"],
+    )
+
+    assert kwargs["messages"][0]["reasoning_content"] == "keep this"
+    assert kwargs["extra_body"] == {"thinking": {"type": "enabled"}}
+    assert kwargs["reasoning_effort"] == "high"
+
+    disabled_kwargs = litellm_client._request_kwargs(
+        candidate,
+        messages=[],
+        temperature=0.01,
+        top_p=0.85,
+        max_tokens=4096,
+        stream=False,
+    )
+    litellm_client._apply_thinking(
+        disabled_kwargs,
+        False,
+        candidate["model"],
+        candidate["channel"],
+    )
+    assert disabled_kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in disabled_kwargs
+
+
+def test_non_deepseek_channels_strip_reasoning_content():
+    kwargs = litellm_client._request_kwargs(
+        {
+            "channel": "openrouter",
+            "model": "openrouter/deepseek/deepseek-v4-pro",
+            "api_key": "or-key",
+            "api_base": "https://openrouter.ai/api/v1",
+        },
+        messages=[
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "provider-specific",
+                "tool_calls": [],
+            }
+        ],
+        temperature=0.01,
+        top_p=0.85,
+        max_tokens=4096,
+        stream=False,
+    )
+
+    assert "reasoning_content" not in kwargs["messages"][0]

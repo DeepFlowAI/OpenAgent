@@ -9,6 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from enum import Enum
+from html import escape
 from typing import Awaitable, AsyncIterator, Callable, Mapping
 from xml.etree import ElementTree
 
@@ -34,9 +35,6 @@ from app.repositories.conversation_step_repository import ConversationStepReposi
 from app.repositories.service_hours_repository import ServiceHoursRepository
 from app.schemas.agent import EngineConfig
 from app.schemas.agent_tool import (
-    HUMAN_HANDOFF_EVENT_KIND,
-    HUMAN_HANDOFF_EVENT_STEP_TYPE,
-    HUMAN_HANDOFF_SCHEMA_VERSION,
     HUMAN_HANDOFF_TOOL_TYPE,
     NOTEBOOK_PARAMETERS_SCHEMA,
     build_human_handoff_parameters_schema,
@@ -48,11 +46,13 @@ from app.schemas.conversation import (
     normalize_channel_source,
     normalize_conversation_source,
 )
-from app.schemas.conversation_step import StepCreate
+from app.schemas.conversation_step import StepCreate, ToolResultSubmit
 from app.services.agent_message_preprocessor import (
     AgentMessagePreprocessor,
 )
+from app.services.human_handoff_event_service import create_human_handoff_event_step
 from app.services.service_hours_service import ServiceHoursEvaluator
+from app.services.tool_executors.base import ToolContext
 from app.services.round_event_buffer import (
     RoundKey,
     format_event_id,
@@ -63,9 +63,10 @@ from app.libs.template import render_template
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 20
+DEFAULT_MAX_TOOL_LOOP_ROUNDS = 20
 TOOL_CALL_LIMIT_ERROR_CODE = "tool_call_limit_exceeded"
 TOOL_CALL_LIMIT_FINISH_REASON = "tool_call_limit"
+TOOL_RESULT_REQUIRED_FINISH_REASON = "tool_result_required"
 
 # Type alias for the optional "is the SSE client still connected?" probe the
 # router may inject. Returning True ⇒ disconnected ⇒ we MUST NOT spend more
@@ -272,6 +273,62 @@ async def _hold_round_lock(
             )
 
 
+@asynccontextmanager
+async def _hold_specific_round_lock(
+    db: AsyncSession,
+    conversation_id: int,
+    round_number: int,
+    *,
+    timeout_sec: float = ROUND_LOCK_WAIT_TIMEOUT_SEC,
+) -> AsyncIterator[None]:
+    """Acquire one fixed round lock with the same wait policy as chat rounds."""
+    conn = await db.connection()
+    deadline = time.monotonic() + timeout_sec
+    poll_sec = 0.1
+    locked = False
+
+    while True:
+        acquired = (await conn.execute(
+            text("SELECT pg_try_advisory_lock(:k1, :k2)"),
+            {"k1": int(conversation_id), "k2": int(round_number)},
+        )).scalar()
+        if acquired:
+            locked = True
+            break
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning(
+                "Specific round lock wait timed out — conv=%s round=%s after %.1fs",
+                conversation_id,
+                round_number,
+                timeout_sec,
+            )
+            raise ConflictError(
+                f"Conversation {conversation_id} round {round_number} is still "
+                f"busy after {int(timeout_sec)}s; please retry shortly"
+            )
+        await asyncio.sleep(min(poll_sec, remaining, 2.0))
+        poll_sec = min(poll_sec * 1.5, 2.0)
+
+    try:
+        yield
+    finally:
+        if locked:
+            try:
+                await conn.execute(
+                    text("SELECT pg_advisory_unlock(:k1, :k2)"),
+                    {"k1": int(conversation_id), "k2": int(round_number)},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to release specific round lock conv=%s round=%s: %s",
+                    conversation_id,
+                    round_number,
+                    exc,
+                )
+
+
 def decide_stream_retry_action(
     *,
     partial_content_chars: int,
@@ -427,12 +484,15 @@ class AgentEngineService:
 
         raw_cfg = agent.engine_config or {}
         config = EngineConfig(**{**EngineConfig().model_dump(), **raw_cfg})
+        max_tool_loop_rounds = _max_tool_loop_rounds(config)
         logger.info(
             "Engine config — model=%s, temperature=%.2f, thinking(first=%s/subsequent=%s), "
-            "pre_recall(enabled=%s, tool_id=%s), system_prompt_len=%d",
+            "pre_recall(enabled=%s, tool_id=%s), max_tool_loop_rounds=%d, "
+            "system_prompt_len=%d",
             config.model.model_name, config.model.temperature,
             config.model.first_round_thinking, config.model.subsequent_rounds_thinking,
             config.pre_recall.enabled, config.pre_recall.tool_id,
+            max_tool_loop_rounds,
             len(config.system_prompt) if config.system_prompt else 0,
         )
 
@@ -698,6 +758,7 @@ class AgentEngineService:
                     # Rebuild state from saved steps and replay events
                     resume_round_msgs: list[dict] = [{"role": "user", "content": user_message}]
                     llm_round_count = 0
+                    pending_external_tool_step = None
 
                     for step in saved_steps:
                         if step.step_type == "user_message":
@@ -737,11 +798,13 @@ class AgentEngineService:
                             last_llm_step_id = step.id
 
                             if step.response_tool_calls:
-                                resume_round_msgs.append({
-                                    "role": "assistant",
-                                    "content": step.content or None,
-                                    "tool_calls": step.response_tool_calls,
-                                })
+                                resume_round_msgs.append(
+                                    _assistant_tool_call_message(
+                                        step.content,
+                                        step.response_tool_calls,
+                                        step.thinking_content,
+                                    )
+                                )
                                 resume_pending_llm_step = step
 
                         elif step.step_type == "tool_call":
@@ -750,7 +813,14 @@ class AgentEngineService:
                                 "tool_name": step.tool_name,
                                 "brief": step.brief,
                                 "tool_call_id": step.tool_call_id,
+                                "status": step.status,
                             })
+                            if (
+                                step.tool_type == HUMAN_HANDOFF_TOOL_TYPE
+                                and step.status == "pending"
+                            ):
+                                pending_external_tool_step = step
+                                continue
                             yield emitter.emit("tool_result", {
                                 "tool_call_id": step.tool_call_id,
                                 "result": (step.tool_response or "")[:500],
@@ -780,6 +850,21 @@ class AgentEngineService:
                                 })
                             yield emitter.emit("done", done_payload)
                             return
+
+                    if pending_external_tool_step is not None:
+                        yield emitter.emit(
+                            "requires_action",
+                            _required_tool_result_action_payload(
+                                pending_external_tool_step,
+                            ),
+                        )
+                        yield emitter.emit(
+                            "done",
+                            _done_waiting_for_tool_result_payload(
+                                pending_external_tool_step,
+                            ),
+                        )
+                        return
 
                     # Check for pending (un-executed) tool calls from the last LLM step
                     if resume_pending_llm_step and resume_pending_llm_step.response_tool_calls:
@@ -942,19 +1027,111 @@ class AgentEngineService:
             # Execute pending tool calls from a resumed interrupted round
             if resume_pending_tool_calls and resume_pending_llm_step:
                 logger.info("Executing %d pending tool calls from resume", len(resume_pending_tool_calls))
+                mixed_handoff_calls = _has_mixed_human_handoff_tool_calls(
+                    resume_pending_tool_calls,
+                    tools_defs,
+                )
                 for tc in resume_pending_tool_calls:
                     tc_id = tc.get("id", "")
                     fn = tc.get("function", {})
                     tool_name = fn.get("name", "")
-                    args_str = fn.get("arguments", "{}")
-                    try:
-                        tool_args = json.loads(args_str)
-                    except json.JSONDecodeError:
-                        tool_args = {}
+                    tool_args = _parse_tool_arguments(
+                        fn.get("arguments", "{}"),
+                        tool_name=tool_name,
+                        tool_call_id=tc_id,
+                    )
 
                     brief = tool_args.get("brief", f"使用工具：{tool_name}")
                     tool_def = next((t for t in tools_defs if t["name"] == tool_name), None)
-                    tool_config = tool_def.get("config", {}) if tool_def else {}
+
+                    if _is_human_handoff_tool(tool_def):
+                        if mixed_handoff_calls:
+                            normalized_handoff = None
+                            validation_error_result = _human_handoff_error_result(
+                                "mixed_tool_calls",
+                                "human_handoff must be the only tool call in one assistant response. "
+                                "Finish other tool calls first, then call human_handoff by itself "
+                                "if human support is still needed.",
+                            )
+                        else:
+                            normalized_handoff, validation_error_result = (
+                                _validate_human_handoff_arguments_for_pending(
+                                    tool_args,
+                                    tool_def,
+                                )
+                            )
+                        if validation_error_result:
+                            tool_step = await _create_human_handoff_error_tool_step(
+                                db,
+                                conversation_id,
+                                agent.tenant_id,
+                                round_number,
+                                tool_name=tool_name,
+                                tool_call_id=tc_id,
+                                tool_args=tool_args,
+                                brief=_safe_tool_brief(brief, tool_name),
+                                tool_def=tool_def,
+                                parent_step_id=resume_pending_llm_step.id,
+                                tool_result=validation_error_result,
+                            )
+                            await ConversationRepository.increment_counters(
+                                db,
+                                conversation_id,
+                                tool_call_count=1,
+                            )
+                            yield emitter.emit("tool_call", {
+                                "step_id": tool_step.id,
+                                "tool_name": tool_name,
+                                "brief": tool_step.brief,
+                                "tool_call_id": tc_id,
+                                "status": tool_step.status,
+                            })
+                            yield emitter.emit("tool_result", {
+                                "tool_call_id": tc_id,
+                                "result": validation_error_result[:500],
+                            })
+                            current_round_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc_id,
+                                "content": validation_error_result,
+                            })
+                            continue
+
+                        assert normalized_handoff is not None
+                        tool_step = await _create_pending_human_handoff_tool_step(
+                            db,
+                            conversation_id,
+                            agent.tenant_id,
+                            round_number,
+                            tool_name=tool_name,
+                            tool_call_id=tc_id,
+                            tool_args=tool_args,
+                            brief=normalized_handoff["brief"],
+                            tool_def=tool_def,
+                            parent_step_id=resume_pending_llm_step.id,
+                        )
+                        await ConversationRepository.increment_counters(
+                            db,
+                            conversation_id,
+                            tool_call_count=1,
+                            round_count=1,
+                        )
+                        yield emitter.emit("tool_call", {
+                            "step_id": tool_step.id,
+                            "tool_name": tool_name,
+                            "brief": brief,
+                            "tool_call_id": tc_id,
+                            "status": "pending",
+                        })
+                        yield emitter.emit(
+                            "requires_action",
+                            _required_tool_result_action_payload(tool_step),
+                        )
+                        yield emitter.emit(
+                            "done",
+                            _done_waiting_for_tool_result_payload(tool_step),
+                        )
+                        return
 
                     tool_start = _now_ms()
                     tool_result = await _execute_tool(tool_name, tool_args, tools_defs, tool_ctx)
@@ -1011,7 +1188,7 @@ class AgentEngineService:
                         "content": tool_result or "",
                     })
 
-            for tool_round_idx in range(resume_tool_round_start, MAX_TOOL_ROUNDS):
+            for tool_round_idx in range(resume_tool_round_start, max_tool_loop_rounds):
                 call_template_vars = {
                     **template_vars,
                     **_datetime_template_vars(),
@@ -1383,28 +1560,131 @@ class AgentEngineService:
                         "Tool calls requested — %s",
                         [tc.get("function", {}).get("name") for tc in stream_result.tool_calls],
                     )
-                    assistant_msg = {
-                        "role": "assistant",
-                        "content": stream_result.content or None,
-                        "tool_calls": stream_result.tool_calls,
-                    }
+                    mixed_handoff_calls = _has_mixed_human_handoff_tool_calls(
+                        stream_result.tool_calls,
+                        tools_defs,
+                    )
+                    assistant_msg = _assistant_tool_call_message(
+                        stream_result.content,
+                        stream_result.tool_calls,
+                        stream_result.thinking_content,
+                    )
                     current_round_messages.append(assistant_msg)
 
                     for tc in stream_result.tool_calls:
                         tc_id = tc.get("id", "")
                         fn = tc.get("function", {})
                         tool_name = fn.get("name", "")
-                        args_str = fn.get("arguments", "{}")
-                        try:
-                            tool_args = json.loads(args_str)
-                        except json.JSONDecodeError:
-                            tool_args = {}
+                        tool_args = _parse_tool_arguments(
+                            fn.get("arguments", "{}"),
+                            tool_name=tool_name,
+                            tool_call_id=tc_id,
+                        )
 
                         brief = tool_args.get("brief", f"使用工具：{tool_name}")
                         tool_def = next((t for t in tools_defs if t["name"] == tool_name), None)
                         tool_id = tool_def["id"] if tool_def else "?"
 
                         tool_config = tool_def.get("config", {}) if tool_def else {}
+
+                        if _is_human_handoff_tool(tool_def):
+                            if mixed_handoff_calls:
+                                normalized_handoff = None
+                                validation_error_result = _human_handoff_error_result(
+                                    "mixed_tool_calls",
+                                    "human_handoff must be the only tool call in one assistant response. "
+                                    "Finish other tool calls first, then call human_handoff by itself "
+                                    "if human support is still needed.",
+                                )
+                            else:
+                                normalized_handoff, validation_error_result = (
+                                    _validate_human_handoff_arguments_for_pending(
+                                        tool_args,
+                                        tool_def,
+                                    )
+                                )
+                            if validation_error_result:
+                                logger.info(
+                                    "Human handoff arguments invalid — name=%s, call_id=%s, "
+                                    "agent_id=%s, tool_id=%s; continuing with tool error",
+                                    tool_name, tc_id, agent_id, tool_id,
+                                )
+                                tool_step = await _create_human_handoff_error_tool_step(
+                                    db,
+                                    conversation_id,
+                                    agent.tenant_id,
+                                    round_number,
+                                    tool_name=tool_name,
+                                    tool_call_id=tc_id,
+                                    tool_args=tool_args,
+                                    brief=_safe_tool_brief(brief, tool_name),
+                                    tool_def=tool_def,
+                                    parent_step_id=llm_step.id,
+                                    tool_result=validation_error_result,
+                                )
+                                await ConversationRepository.increment_counters(
+                                    db,
+                                    conversation_id,
+                                    tool_call_count=1,
+                                )
+                                yield emitter.emit("tool_call", {
+                                    "step_id": tool_step.id,
+                                    "tool_name": tool_name,
+                                    "brief": tool_step.brief,
+                                    "tool_call_id": tc_id,
+                                    "status": tool_step.status,
+                                })
+                                yield emitter.emit("tool_result", {
+                                    "tool_call_id": tc_id,
+                                    "result": validation_error_result[:500],
+                                })
+                                current_round_messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tc_id,
+                                    "content": validation_error_result,
+                                })
+                                continue
+
+                            assert normalized_handoff is not None
+                            logger.info(
+                                "Human handoff requested — name=%s, call_id=%s, "
+                                "agent_id=%s, tool_id=%s; waiting for external result",
+                                tool_name, tc_id, agent_id, tool_id,
+                            )
+                            tool_step = await _create_pending_human_handoff_tool_step(
+                                db,
+                                conversation_id,
+                                agent.tenant_id,
+                                round_number,
+                                tool_name=tool_name,
+                                tool_call_id=tc_id,
+                                tool_args=tool_args,
+                                brief=normalized_handoff["brief"],
+                                tool_def=tool_def,
+                                parent_step_id=llm_step.id,
+                            )
+                            await ConversationRepository.increment_counters(
+                                db,
+                                conversation_id,
+                                tool_call_count=1,
+                                round_count=1,
+                            )
+                            yield emitter.emit("tool_call", {
+                                "step_id": tool_step.id,
+                                "tool_name": tool_name,
+                                "brief": brief,
+                                "tool_call_id": tc_id,
+                                "status": "pending",
+                            })
+                            yield emitter.emit(
+                                "requires_action",
+                                _required_tool_result_action_payload(tool_step),
+                            )
+                            yield emitter.emit(
+                                "done",
+                                _done_waiting_for_tool_result_payload(tool_step),
+                            )
+                            return
 
                         logger.info(
                             "Executing tool — name=%s, call_id=%s, agent_id=%s, tool_id=%s\n"
@@ -1532,7 +1812,10 @@ class AgentEngineService:
                 return
 
             # Exceeded max tool rounds
-            logger.warning("── Engine abort ── exceeded max tool rounds (%d)", MAX_TOOL_ROUNDS)
+            logger.warning(
+                "── Engine abort ── exceeded max tool rounds (%d)",
+                max_tool_loop_rounds,
+            )
             reply = _tool_call_limit_reply_content(config)
             assistant_step = await _create_step(db, conversation_id, agent.tenant_id, {
                 "round_number": round_number,
@@ -1558,6 +1841,220 @@ class AgentEngineService:
             })
             return
 
+    @staticmethod
+    async def submit_tool_result_stream(
+        db: AsyncSession,
+        *,
+        agent_id: int,
+        conversation_id: int,
+        tenant_id: str,
+        data: ToolResultSubmit,
+        is_disconnected_cb: IsDisconnectedCallback | None = None,
+    ) -> AsyncIterator[str]:
+        """Submit an external tool result and continue safely when needed."""
+        set_conversation_id(conversation_id)
+        span_attrs = {
+            "agent.id": agent_id,
+            "conversation.id": conversation_id,
+            "tool.call_id": data.tool_call_id,
+            "tool.result.status": data.status,
+            "app.trace_id": get_trace_id(),
+            "app.request_id": get_request_id(),
+        }
+        with conversation_span("tool_result", span_attrs) as span:
+            inner = AgentEngineService._submit_tool_result_stream_impl(
+                db,
+                agent_id=agent_id,
+                conversation_id=conversation_id,
+                tenant_id=tenant_id,
+                data=data,
+                is_disconnected_cb=is_disconnected_cb,
+            )
+            try:
+                async for event in inner:
+                    yield event
+                span.set_status_ok()
+            except Exception as exc:
+                span.set_attribute("error.type", type(exc).__name__)
+                span.set_status_error(str(exc))
+                raise
+            finally:
+                await inner.aclose()
+
+    @staticmethod
+    async def _submit_tool_result_stream_impl(
+        db: AsyncSession,
+        *,
+        agent_id: int,
+        conversation_id: int,
+        tenant_id: str,
+        data: ToolResultSubmit,
+        is_disconnected_cb: IsDisconnectedCallback | None = None,
+    ) -> AsyncIterator[str]:
+        agent = await AgentRepository.get_by_id(db, agent_id)
+        if not agent or agent.tenant_id != tenant_id:
+            raise NotFoundError("Agent not found")
+        conv = await ConversationRepository.get_by_id(db, conversation_id)
+        if (
+            conv is None
+            or conv.tenant_id != tenant_id
+            or conv.agent_id != agent_id
+        ):
+            raise NotFoundError("Conversation not found")
+
+        tool_step = await ConversationStepRepository.get_tool_call_by_call_id(
+            db,
+            conversation_id,
+            data.tool_call_id,
+        )
+        if (
+            tool_step is None
+            or tool_step.tool_type != HUMAN_HANDOFF_TOOL_TYPE
+        ):
+            raise NotFoundError("Tool call not found")
+
+        round_number = tool_step.round_number
+        # While a human-handoff result is being applied, block the next user
+        # message from taking the same "next round" lock. This keeps the
+        # failed-handoff recovery reply from racing with a fresh user turn.
+        async with _hold_specific_round_lock(
+            db,
+            conversation_id,
+            round_number + 1,
+        ):
+            await db.refresh(conv)
+            tool_step = await ConversationStepRepository.get_tool_call_by_call_id(
+                db,
+                conversation_id,
+                data.tool_call_id,
+            )
+            if (
+                tool_step is None
+                or tool_step.tool_type != HUMAN_HANDOFF_TOOL_TYPE
+            ):
+                raise NotFoundError("Tool call not found")
+
+            round_key = RoundKey(conversation_id=conversation_id, round_number=round_number)
+            latest_seq = round_event_buffer.latest_seq(round_key)
+            emitter = _SSEEmitter()
+            emitter.bind(
+                round_key,
+                seq_offset=(latest_seq + 1) if latest_seq is not None else 0,
+            )
+
+            from app.services.conversation_step_service import ConversationStepService
+
+            updated_step = await ConversationStepService.submit_tool_result(
+                db,
+                conversation_id,
+                tenant_id,
+                agent_id,
+                data,
+            )
+            yield emitter.emit("tool_result", {
+                "tool_call_id": updated_step.tool_call_id,
+                "result": (updated_step.tool_response or "")[:500],
+                "status": data.status,
+            })
+
+            if data.status == "handoff_success":
+                yield emitter.emit("done", {
+                    "assistant_step_id": None,
+                    "final_content": "",
+                    "finish_reason": "handoff_success",
+                })
+                return
+
+            if (conv.round_count or 0) != round_number:
+                logger.info(
+                    "Skipping failed handoff continuation because newer rounds exist — "
+                    "conv=%s tool_round=%s round_count=%s call_id=%s",
+                    conversation_id,
+                    round_number,
+                    conv.round_count,
+                    data.tool_call_id,
+                )
+                yield emitter.emit("done", {
+                    "assistant_step_id": None,
+                    "final_content": "",
+                    "finish_reason": "handoff_failed",
+                    "skipped_reason": "newer_round_exists",
+                })
+                return
+
+            async for event in _continue_after_failed_tool_result(
+                db,
+                agent=agent,
+                conv=conv,
+                agent_id=agent_id,
+                conversation_id=conversation_id,
+                tool_call_id=data.tool_call_id,
+                emitter=emitter,
+                is_disconnected_cb=is_disconnected_cb,
+            ):
+                yield event
+
+    @staticmethod
+    async def continue_after_tool_result(
+        db: AsyncSession,
+        *,
+        agent_id: int,
+        conversation_id: int,
+        tool_call_id: str,
+        is_disconnected_cb: IsDisconnectedCallback | None = None,
+    ) -> AsyncIterator[str]:
+        """Continue the same round after an already-submitted failed tool result."""
+        agent = await AgentRepository.get_by_id(db, agent_id)
+        if not agent:
+            raise NotFoundError("Agent not found")
+        conv = await ConversationRepository.get_by_id(db, conversation_id)
+        if (
+            conv is None
+            or conv.tenant_id != agent.tenant_id
+            or conv.agent_id != agent_id
+        ):
+            raise NotFoundError("Conversation not found")
+
+        tool_step = await ConversationStepRepository.get_tool_call_by_call_id(
+            db,
+            conversation_id,
+            tool_call_id,
+        )
+        if (
+            tool_step is None
+            or tool_step.tool_type != HUMAN_HANDOFF_TOOL_TYPE
+            or tool_step.status != "error"
+        ):
+            return
+
+        round_number = tool_step.round_number
+        async with _hold_specific_round_lock(
+            db,
+            conversation_id,
+            round_number + 1,
+        ):
+            await db.refresh(conv)
+            if (conv.round_count or 0) != round_number:
+                raise ConflictError("Cannot continue after newer conversation rounds exist")
+            round_key = RoundKey(conversation_id=conversation_id, round_number=round_number)
+            latest_seq = round_event_buffer.latest_seq(round_key)
+            emitter = _SSEEmitter()
+            emitter.bind(
+                round_key,
+                seq_offset=(latest_seq + 1) if latest_seq is not None else 0,
+            )
+            async for event in _continue_after_failed_tool_result(
+                db,
+                agent=agent,
+                conv=conv,
+                agent_id=agent_id,
+                conversation_id=conversation_id,
+                tool_call_id=tool_call_id,
+                emitter=emitter,
+                is_disconnected_cb=is_disconnected_cb,
+            ):
+                yield event
+
 
 # ── Helper functions ──
 
@@ -1567,6 +2064,20 @@ def _tool_call_limit_reply_content(config: EngineConfig) -> str:
     content = config.conversation_settings.tool_call_limit_reply.content
     content = content.strip() if content else ""
     return content or default
+
+
+def _max_tool_loop_rounds(config: EngineConfig) -> int:
+    """Return the configured per-turn LLM/tool loop limit."""
+    value = getattr(
+        config.context,
+        "max_tool_loop_rounds",
+        DEFAULT_MAX_TOOL_LOOP_ROUNDS,
+    )
+    try:
+        rounds = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_TOOL_LOOP_ROUNDS
+    return max(rounds, 1)
 
 
 def _watchdog_for(config: EngineConfig) -> dict:
@@ -1674,6 +2185,250 @@ class _SSEEmitter:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _is_human_handoff_tool(tool_def: dict | None) -> bool:
+    return bool(tool_def) and tool_def.get("tool_type") == HUMAN_HANDOFF_TOOL_TYPE
+
+
+def _parse_tool_arguments(
+    raw_arguments,
+    *,
+    tool_name: str = "",
+    tool_call_id: str = "",
+) -> dict:
+    if isinstance(raw_arguments, dict):
+        return raw_arguments
+    if raw_arguments is None:
+        return {}
+    if not isinstance(raw_arguments, str):
+        logger.warning(
+            "Tool arguments are not JSON text — tool=%s, call_id=%s, type=%s",
+            tool_name,
+            tool_call_id,
+            type(raw_arguments).__name__,
+        )
+        return {}
+
+    text_value = raw_arguments.strip()
+    if not text_value:
+        return {}
+
+    last_error: json.JSONDecodeError | None = None
+    repaired = _append_missing_json_closers(text_value)
+    candidates = [text_value]
+    if repaired and repaired != text_value:
+        candidates.append(repaired)
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+        if isinstance(parsed, dict):
+            if candidate != text_value:
+                logger.warning(
+                    "Repaired malformed tool arguments — tool=%s, call_id=%s",
+                    tool_name,
+                    tool_call_id,
+                )
+            return parsed
+        logger.warning(
+            "Tool arguments JSON is not an object — tool=%s, call_id=%s, type=%s",
+            tool_name,
+            tool_call_id,
+            type(parsed).__name__,
+        )
+        return {}
+
+    logger.warning(
+        "Failed to parse tool arguments — tool=%s, call_id=%s, error=%s, raw=%r",
+        tool_name,
+        tool_call_id,
+        last_error,
+        text_value[:500],
+    )
+    return {}
+
+
+def _append_missing_json_closers(value: str) -> str | None:
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+
+    for char in value:
+        if escaped:
+            escaped = False
+            continue
+        if in_string and char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            stack.append("}")
+        elif char == "[":
+            stack.append("]")
+        elif char in ("}", "]"):
+            if not stack or stack[-1] != char:
+                return None
+            stack.pop()
+
+    if in_string or not stack:
+        return None
+    return value + "".join(reversed(stack))
+
+
+def _has_mixed_human_handoff_tool_calls(
+    tool_calls: list[dict] | None,
+    tools_defs: list[dict],
+) -> bool:
+    if not tool_calls or len(tool_calls) <= 1:
+        return False
+    for tc in tool_calls:
+        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+        tool_name = fn.get("name", "")
+        tool_def = next((t for t in tools_defs if t["name"] == tool_name), None)
+        if _is_human_handoff_tool(tool_def):
+            return True
+    return False
+
+
+def _safe_tool_brief(value, tool_name: str) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return f"使用工具：{tool_name}"
+
+
+def _human_handoff_error_result(code: str, message: str) -> str:
+    return (
+        f'<human_handoff_response status="error" code="{escape(code)}">'
+        f"{escape(message)}"
+        "</human_handoff_response>"
+    )
+
+
+def _validate_human_handoff_arguments_for_pending(
+    tool_args: dict,
+    tool_def: dict | None,
+) -> tuple[dict[str, str] | None, str | None]:
+    try:
+        normalized = normalize_human_handoff_arguments(
+            tool_args or {},
+            (tool_def or {}).get("config") or {},
+        )
+    except ValueError as exc:
+        return None, _human_handoff_error_result("invalid_arguments", str(exc))
+    return normalized, None
+
+
+def _required_tool_result_action_payload(tool_step) -> dict:
+    metadata = getattr(tool_step, "metadata_", None) or {}
+    if isinstance(metadata, dict):
+        action = metadata.get("required_action")
+        if isinstance(action, dict):
+            return {
+                "tool_call_step_id": tool_step.id,
+                "tool_call_id": tool_step.tool_call_id,
+                "tool_name": tool_step.tool_name,
+                "tool_type": tool_step.tool_type,
+                "brief": tool_step.brief,
+                **action,
+            }
+    return {
+        "type": "submit_tool_result",
+        "tool_call_step_id": tool_step.id,
+        "tool_call_id": tool_step.tool_call_id,
+        "tool_name": tool_step.tool_name,
+        "tool_type": tool_step.tool_type,
+        "brief": tool_step.brief,
+    }
+
+
+def _done_waiting_for_tool_result_payload(tool_step) -> dict:
+    return {
+        "assistant_step_id": None,
+        "final_content": "",
+        "finish_reason": TOOL_RESULT_REQUIRED_FINISH_REASON,
+        "required_action": _required_tool_result_action_payload(tool_step),
+    }
+
+
+async def _create_pending_human_handoff_tool_step(
+    db: AsyncSession,
+    conversation_id: int,
+    tenant_id: str,
+    round_number: int,
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    tool_args: dict,
+    brief: str,
+    tool_def: dict,
+    parent_step_id: int,
+):
+    """Persist a human_handoff tool call that waits for an external result."""
+    tool_config = tool_def.get("config", {}) if tool_def else {}
+    action = {
+        "type": "submit_tool_result",
+        "tool_call_id": tool_call_id,
+        "tool_name": tool_name,
+        "tool_type": HUMAN_HANDOFF_TOOL_TYPE,
+        "brief": brief,
+    }
+    tool_step = await _create_step(db, conversation_id, tenant_id, {
+        "round_number": round_number,
+        "step_type": "tool_call",
+        "tool_name": tool_name,
+        "tool_type": HUMAN_HANDOFF_TOOL_TYPE,
+        "tool_call_id": tool_call_id,
+        "tool_arguments": tool_args,
+        "tool_response": None,
+        "brief": brief,
+        "duration_ms": 0,
+        "parent_step_id": parent_step_id,
+        "status": "pending",
+        "metadata": {
+            "requires_external_tool_result": True,
+            "required_action": action,
+            "tool_config": tool_config,
+        },
+    })
+    return tool_step
+
+
+async def _create_human_handoff_error_tool_step(
+    db: AsyncSession,
+    conversation_id: int,
+    tenant_id: str,
+    round_number: int,
+    *,
+    tool_name: str,
+    tool_call_id: str,
+    tool_args: dict,
+    brief: str,
+    tool_def: dict | None,
+    parent_step_id: int,
+    tool_result: str,
+):
+    tool_step_data = {
+        "round_number": round_number,
+        "step_type": "tool_call",
+        "tool_name": tool_name,
+        "tool_type": HUMAN_HANDOFF_TOOL_TYPE,
+        "tool_call_id": tool_call_id,
+        "tool_arguments": tool_args,
+        "tool_response": tool_result,
+        "brief": brief,
+        "duration_ms": 0,
+        "parent_step_id": parent_step_id,
+    }
+    tool_step_data.update(_tool_call_status_fields(tool_def, tool_result))
+    return await _create_step(db, conversation_id, tenant_id, tool_step_data)
 
 
 async def _create_step(
@@ -1897,6 +2652,21 @@ class _HistoryMessages(list):
         self.tool_trace_round_count = tool_trace_round_count
 
 
+def _assistant_tool_call_message(
+    content: str | None,
+    tool_calls: list[dict],
+    thinking_content: str | None = None,
+) -> dict:
+    message = {
+        "role": "assistant",
+        "content": content or None,
+        "tool_calls": tool_calls,
+    }
+    if thinking_content:
+        message["reasoning_content"] = thinking_content
+    return message
+
+
 def _datetime_template_vars() -> dict[str, str]:
     """Return built-in datetime variables for the current LLM call."""
     from datetime import datetime as _dt, timezone as _tz, timedelta as _td
@@ -1924,7 +2694,8 @@ def _runtime_template_vars(
         1 for message in current_round_messages
         if message.get("role") == "tool"
     )
-    remaining_tool_rounds = max(MAX_TOOL_ROUNDS - llm_call_index + 1, 0)
+    max_tool_loop_rounds = _max_tool_loop_rounds(config)
+    remaining_tool_rounds = max(max_tool_loop_rounds - llm_call_index + 1, 0)
     return {
         "context_max_rounds": str(config.context.max_rounds),
         "context_history_tool_rounds": str(config.context.history_tool_rounds),
@@ -1941,7 +2712,7 @@ def _runtime_template_vars(
         "llm_call_index_in_round": str(llm_call_index),
         "completed_tool_call_count_in_round": str(completed_tool_calls),
         "next_tool_call_index_in_round": str(completed_tool_calls + 1),
-        "max_tool_loop_rounds": str(MAX_TOOL_ROUNDS),
+        "max_tool_loop_rounds": str(max_tool_loop_rounds),
         "remaining_tool_loop_rounds": str(remaining_tool_rounds),
     }
 
@@ -2035,12 +2806,22 @@ async def _build_history(
     for rn in sorted_round_nums:
         round_steps = sorted(rounds[rn], key=lambda s: s["step_order"])
         include_tools = rn in tool_eligible_rounds
+        successful_tool_call_ids = {
+            s.get("tool_call_id")
+            for s in round_steps
+            if (
+                s.get("status") == "success"
+                and s["step_type"] == "tool_call"
+                and s.get("tool_call_id")
+            )
+        }
 
         for s in round_steps:
-            # Sub-req 2: incomplete llm_call steps preserve partial content for
-            # ops/audit but must NOT be replayed into next-round LLM context —
-            # their tool_calls / content can be malformed.
-            if s.get("status") == "incomplete":
+            # Non-success steps preserve audit state but must not be replayed
+            # into future LLM context. That includes pending external tool
+            # calls: replaying their assistant tool_calls without a completed
+            # tool result would violate the OpenAI tool-message protocol.
+            if s.get("status") != "success":
                 continue
             st = s["step_type"]
             if st == "user_message" and s.get("content"):
@@ -2048,11 +2829,20 @@ async def _build_history(
             elif st == "assistant_message" and s.get("content"):
                 messages.append({"role": "assistant", "content": s["content"]})
             elif include_tools and st == "llm_call" and s.get("response_tool_calls"):
-                messages.append({
-                    "role": "assistant",
-                    "content": s.get("content") or None,
-                    "tool_calls": s["response_tool_calls"],
-                })
+                response_tool_call_ids = {
+                    tc.get("id")
+                    for tc in s["response_tool_calls"]
+                    if isinstance(tc, dict) and tc.get("id")
+                }
+                if not response_tool_call_ids.issubset(successful_tool_call_ids):
+                    continue
+                messages.append(
+                    _assistant_tool_call_message(
+                        s.get("content"),
+                        s["response_tool_calls"],
+                        s.get("thinking_content"),
+                    )
+                )
                 actual_tool_trace_rounds.add(rn)
             elif include_tools and st == "tool_call" and s.get("tool_call_id"):
                 tool_response = s.get("tool_response") or ""
@@ -2090,6 +2880,425 @@ def _assemble_messages(
     messages.extend(history)
     messages.extend(current_round)
     return messages
+
+
+async def _stream_llm_with_retry_events(
+    db: AsyncSession,
+    *,
+    conversation_id: int,
+    tenant_id: str,
+    round_number: int,
+    tool_round_number: int,
+    messages: list[dict],
+    openai_tools,
+    model_cfg,
+    thinking_enabled: bool,
+    emitter: "_SSEEmitter",
+    is_disconnected_cb: IsDisconnectedCallback | None,
+    state: dict,
+) -> AsyncIterator[str]:
+    """Stream one LLM call using the same retry/incomplete policy as chat."""
+    start_ms = _now_ms()
+    llm_client = create_llm_client()
+    attempt_retry_count = 0
+    attempt_last_reason: str | None = None
+
+    while True:
+        stream_iter, stream_result = await llm_client.stream_chat(
+            messages,
+            model=model_cfg.model_name,
+            tools=openai_tools,
+            temperature=model_cfg.temperature,
+            top_p=model_cfg.top_p,
+            max_tokens=model_cfg.max_tokens,
+            thinking_enabled=thinking_enabled,
+        )
+
+        partial_content_chars = 0
+        delta_count = 0
+        try:
+            async for delta in stream_iter:
+                delta_count += 1
+                if delta.thinking_content:
+                    yield emitter.emit("thinking_delta", {"content": delta.thinking_content})
+                if delta.content:
+                    partial_content_chars += len(delta.content)
+                    yield emitter.emit("content_delta", {"content": delta.content})
+        except (asyncio.CancelledError, GeneratorExit) as cancel_exc:
+            if partial_content_chars > 0 or (
+                stream_result is not None and stream_result.thinking_content
+            ):
+                try:
+                    await asyncio.shield(_persist_incomplete_llm_step(
+                        db,
+                        conversation_id,
+                        tenant_id,
+                        round_number=round_number,
+                        stream_result=stream_result,
+                        messages=messages,
+                        openai_tools=openai_tools,
+                        model_cfg=model_cfg,
+                        thinking_enabled=thinking_enabled,
+                        duration_ms=_now_ms() - start_ms,
+                        incomplete_reason="client_cancelled",
+                        retry_count=attempt_retry_count,
+                        partial_content_chars=partial_content_chars,
+                    ))
+                except Exception as persist_exc:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to persist incomplete step on cancel: %s",
+                        persist_exc,
+                    )
+            current_span().set_attribute("gen_ai.cancel.reason", "client_cancelled")
+            raise cancel_exc
+        except LLMAPIError as exc:
+            attempt_last_reason = exc.error_type or "api_error"
+            current_span().set_attribute(
+                "gen_ai.retry.last_reason",
+                attempt_last_reason,
+            )
+            if attempt_retry_count > 0:
+                current_span().set_attribute(
+                    "gen_ai.retry.count",
+                    attempt_retry_count,
+                )
+            if partial_content_chars > 0 or (
+                stream_result is not None and stream_result.thinking_content
+            ):
+                try:
+                    await _persist_incomplete_llm_step(
+                        db,
+                        conversation_id,
+                        tenant_id,
+                        round_number=round_number,
+                        stream_result=stream_result,
+                        messages=messages,
+                        openai_tools=openai_tools,
+                        model_cfg=model_cfg,
+                        thinking_enabled=thinking_enabled,
+                        duration_ms=_now_ms() - start_ms,
+                        incomplete_reason=f"api_error:{attempt_last_reason}",
+                        retry_count=attempt_retry_count,
+                        partial_content_chars=partial_content_chars,
+                    )
+                except Exception as persist_exc:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to persist incomplete step on api_error: %s",
+                        persist_exc,
+                    )
+            raise
+
+        if stream_result.incomplete_reason is None:
+            duration_ms = _now_ms() - start_ms
+            stream_result.retry_count = attempt_retry_count
+            state.update({
+                "stream_result": stream_result,
+                "duration_ms": duration_ms,
+                "retry_count": attempt_retry_count,
+                "last_incomplete_reason": attempt_last_reason,
+                "delta_count": delta_count,
+            })
+            return
+
+        attempt_last_reason = stream_result.incomplete_reason
+        action = decide_stream_retry_action(
+            partial_content_chars=partial_content_chars,
+            retry_count=attempt_retry_count,
+            retry_enabled=settings.LLM_STREAM_RETRY_ENABLED,
+            retry_max=settings.LLM_STREAM_RETRY_MAX,
+            reset_max_chars=settings.LLM_STREAM_RESET_MAX_CHARS,
+        )
+        if action is StreamRetryAction.GIVE_UP:
+            try:
+                await _persist_incomplete_llm_step(
+                    db,
+                    conversation_id,
+                    tenant_id,
+                    round_number=round_number,
+                    stream_result=stream_result,
+                    messages=messages,
+                    openai_tools=openai_tools,
+                    model_cfg=model_cfg,
+                    thinking_enabled=thinking_enabled,
+                    duration_ms=_now_ms() - start_ms,
+                    incomplete_reason=f"give_up:{attempt_last_reason}",
+                    retry_count=attempt_retry_count,
+                    partial_content_chars=partial_content_chars,
+                )
+            except Exception as persist_exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to persist incomplete step on give_up: %s",
+                    persist_exc,
+                )
+            raise LLMAPIError(
+                status_code=502,
+                message=(
+                    f"LLM stream incomplete (reason={attempt_last_reason}, "
+                    f"retries={attempt_retry_count}, "
+                    f"partial_chars={partial_content_chars})"
+                ),
+                error_type=attempt_last_reason,
+            )
+
+        if is_disconnected_cb is not None:
+            try:
+                if await is_disconnected_cb():
+                    try:
+                        await _persist_incomplete_llm_step(
+                            db,
+                            conversation_id,
+                            tenant_id,
+                            round_number=round_number,
+                            stream_result=stream_result,
+                            messages=messages,
+                            openai_tools=openai_tools,
+                            model_cfg=model_cfg,
+                            thinking_enabled=thinking_enabled,
+                            duration_ms=_now_ms() - start_ms,
+                            incomplete_reason="client_disconnected",
+                            retry_count=attempt_retry_count,
+                            partial_content_chars=partial_content_chars,
+                        )
+                    except Exception as persist_exc:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to persist incomplete step on disconnect: %s",
+                            persist_exc,
+                        )
+                    state["disconnected"] = True
+                    return
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("is_disconnected_cb raised — assuming connected: %s", exc)
+
+        if action is StreamRetryAction.RESET_RETRY:
+            yield emitter.emit("assistant_reset", {
+                "round_number": round_number,
+                "tool_round": tool_round_number,
+                "reason": attempt_last_reason,
+            })
+
+        attempt_retry_count += 1
+        backoff = min(
+            settings.LLM_STREAM_RETRY_BACKOFF_SEC * (2 ** (attempt_retry_count - 1)),
+            4.0,
+        )
+        if backoff > 0:
+            await asyncio.sleep(backoff)
+
+
+async def _continue_after_failed_tool_result(
+    db: AsyncSession,
+    *,
+    agent,
+    conv,
+    agent_id: int,
+    conversation_id: int,
+    tool_call_id: str,
+    emitter: "_SSEEmitter",
+    is_disconnected_cb: IsDisconnectedCallback | None,
+) -> AsyncIterator[str]:
+    """Continue the same round after a failed external handoff result."""
+    tool_step = await ConversationStepRepository.get_tool_call_by_call_id(
+        db,
+        conversation_id,
+        tool_call_id,
+    )
+    if (
+        tool_step is None
+        or tool_step.tool_type != HUMAN_HANDOFF_TOOL_TYPE
+        or tool_step.status != "error"
+    ):
+        return
+
+    raw_cfg = agent.engine_config or {}
+    config = EngineConfig(**{**EngineConfig().model_dump(), **raw_cfg})
+    round_number = tool_step.round_number
+    saved_steps = await ConversationStepRepository.get_steps_by_round(
+        db,
+        conversation_id,
+        round_number,
+    )
+
+    current_round_messages = _rebuild_current_round_messages_for_tool_result(
+        saved_steps,
+        tool_call_id,
+    )
+    if not current_round_messages:
+        raise ValidationError("Cannot rebuild tool result continuation context")
+
+    history = await _build_history(db, conversation_id, config, round_number)
+    conversation_source = getattr(conv, "source", "api")
+    tools_defs = await _load_tools(db, agent_id, config.selected_tool_ids)
+    tools_defs = await _filter_runtime_tools(
+        db,
+        tools_defs,
+        conversation_source=conversation_source,
+        tenant_id=agent.tenant_id,
+    )
+    tool_ctx = ToolContext(
+        db=db,
+        conversation_id=conversation_id,
+        tenant_id=agent.tenant_id,
+        agent_id=agent_id,
+        conversation_source=conversation_source,
+    )
+    llm_call_index = sum(
+        1 for step in saved_steps if step.step_type == "llm_call"
+    ) + 1
+    template_vars = {
+        **_datetime_template_vars(),
+        **_runtime_template_vars(
+            config=config,
+            round_number=round_number,
+            history=history,
+            llm_call_index=llm_call_index,
+            current_round_messages=current_round_messages,
+        ),
+    }
+    rendered_prompt = await _render_system_prompt(
+        config.system_prompt,
+        template_vars,
+        tools_defs,
+        tool_ctx,
+    )
+    messages = _assemble_messages(rendered_prompt, history, current_round_messages)
+
+    model_cfg = config.model
+    thinking_enabled = model_cfg.subsequent_rounds_thinking
+    stream_state: dict = {}
+    async for event in _stream_llm_with_retry_events(
+        db,
+        conversation_id=conversation_id,
+        tenant_id=agent.tenant_id,
+        round_number=round_number,
+        tool_round_number=llm_call_index,
+        messages=messages,
+        openai_tools=None,
+        model_cfg=model_cfg,
+        thinking_enabled=thinking_enabled,
+        emitter=emitter,
+        is_disconnected_cb=is_disconnected_cb,
+        state=stream_state,
+    ):
+        yield event
+    if stream_state.get("disconnected"):
+        return
+
+    stream_result = stream_state["stream_result"]
+    duration_ms = stream_state["duration_ms"]
+    if stream_state.get("retry_count", 0) > 0:
+        current_span().set_attribute("gen_ai.retry.count", stream_state["retry_count"])
+        current_span().set_attribute(
+            "gen_ai.retry.last_reason",
+            stream_state.get("last_incomplete_reason") or "",
+        )
+        current_span().set_attribute("gen_ai.stream.incomplete", True)
+
+    llm_step = await _create_step(db, conversation_id, agent.tenant_id, {
+        "round_number": round_number,
+        "step_type": "llm_call",
+        "content": stream_result.content or None,
+        "model_name": stream_result.model or model_cfg.model_name,
+        "provider": "openai_compatible",
+        "thinking_enabled": thinking_enabled,
+        "thinking_content": stream_result.thinking_content or None,
+        "request_messages": messages,
+        "request_tools": None,
+        "request_params": {
+            "temperature": model_cfg.temperature,
+            "top_p": model_cfg.top_p,
+            "max_tokens": model_cfg.max_tokens,
+        },
+        "response_tool_calls": None,
+        "finish_reason": stream_result.finish_reason,
+        "request_id": stream_result.request_id,
+        "input_tokens": stream_result.input_tokens,
+        "output_tokens": stream_result.output_tokens,
+        "total_tokens": stream_result.total_tokens,
+        "duration_ms": duration_ms,
+        "metadata": {
+            "continued_after_tool_call_id": tool_call_id,
+            "continued_after_tool_status": "handoff_failed",
+            "stream_retry_count": stream_state.get("retry_count", 0),
+            "stream_incomplete_reason": stream_state.get("last_incomplete_reason"),
+        },
+    })
+    await ConversationRepository.increment_counters(
+        db,
+        conversation_id,
+        llm_call_count=1,
+        input_tokens=stream_result.input_tokens,
+        output_tokens=stream_result.output_tokens,
+        total_tokens=stream_result.total_tokens,
+    )
+    yield emitter.emit("llm_step_created", {"step_id": llm_step.id})
+
+    assistant_step = None
+    if stream_result.content:
+        assistant_step = await _create_step(db, conversation_id, agent.tenant_id, {
+            "round_number": round_number,
+            "step_type": "assistant_message",
+            "content": stream_result.content,
+            "parent_step_id": llm_step.id,
+        })
+    yield emitter.emit("done", {
+        "assistant_step_id": assistant_step.id if assistant_step else None,
+        "final_content": stream_result.content or "",
+        "finish_reason": "handoff_failed",
+    })
+
+
+def _rebuild_current_round_messages_for_tool_result(
+    steps: list,
+    tool_call_id: str,
+) -> list[dict]:
+    """Rebuild the current round through the submitted external tool result."""
+    messages: list[dict] = []
+    successful_or_failed_tool_ids = {
+        step.tool_call_id
+        for step in steps
+        if (
+            step.step_type == "tool_call"
+            and step.status in {"success", "error"}
+            and step.tool_call_id
+        )
+    }
+    reached_target_tool = False
+
+    for step in steps:
+        if step.step_type == "user_message":
+            snapshot_content = AgentMessagePreprocessor.get_snapshot_processed_content(
+                step.metadata_ or {}
+            )
+            content = snapshot_content if snapshot_content is not None else step.content
+            if content:
+                messages.append({"role": "user", "content": content})
+        elif step.step_type == "llm_call" and step.response_tool_calls:
+            response_tool_call_ids = {
+                tc.get("id")
+                for tc in step.response_tool_calls
+                if isinstance(tc, dict) and tc.get("id")
+            }
+            if response_tool_call_ids.issubset(successful_or_failed_tool_ids):
+                messages.append(
+                    _assistant_tool_call_message(
+                        step.content,
+                        step.response_tool_calls,
+                        step.thinking_content,
+                    )
+                )
+        elif step.step_type == "tool_call" and step.tool_call_id:
+            if step.status not in {"success", "error"}:
+                continue
+            messages.append({
+                "role": "tool",
+                "tool_call_id": step.tool_call_id,
+                "content": step.tool_response or step.error_message or "",
+            })
+            if step.tool_call_id == tool_call_id:
+                reached_target_tool = True
+                break
+
+    return messages if reached_target_tool else []
 
 
 async def _render_system_prompt(
@@ -2177,8 +3386,14 @@ async def _create_human_handoff_event_step(
         return None
 
     try:
-        handoff = normalize_human_handoff_arguments(
-            tool_args, (tool_def or {}).get("config") or {}
+        return await create_human_handoff_event_step(
+            db,
+            conv,
+            agent_id,
+            round_number,
+            tool_step,
+            tool_args,
+            (tool_def or {}).get("config") or {},
         )
     except ValueError:
         logger.warning(
@@ -2186,29 +3401,6 @@ async def _create_human_handoff_event_step(
             exc_info=True,
         )
         return None
-
-    requested_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    payload = {
-        "event_kind": HUMAN_HANDOFF_EVENT_KIND,
-        "schema_version": HUMAN_HANDOFF_SCHEMA_VERSION,
-        "related_tool_call_step_id": tool_step.id,
-        "conversation": {
-            "id": conv.id,
-            "external_id": getattr(conv, "external_id", None),
-        },
-        "tenant_id": conv.tenant_id,
-        "agent_id": agent_id,
-        "requested_at": requested_at,
-        "handoff": handoff,
-    }
-    return await _create_step(db, conv.id, conv.tenant_id, {
-        "round_number": round_number,
-        "step_type": HUMAN_HANDOFF_EVENT_STEP_TYPE,
-        "content": handoff["brief"],
-        "brief": handoff["brief"],
-        "parent_step_id": tool_step.id,
-        "metadata": payload,
-    })
 
 
 async def _execute_pre_recall(

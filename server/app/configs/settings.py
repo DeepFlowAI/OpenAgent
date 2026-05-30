@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     # a private proxy / mirror; defaults to the public OpenRouter endpoint.
     OPENROUTER_API_KEY: str = Field(default="")
     OPENROUTER_BASE_URL: str = Field(default="https://openrouter.ai/api/v1")
+    # DeepSeek official OpenAI-compatible API
+    DEEPSEEK_API_KEY: str = Field(default="")
+    DEEPSEEK_API_BASE_URL: str = Field(default="https://api.deepseek.com")
     # Alibaba Bailian OpenAI-compatible API — preferred route for supported domestic models
     ALIYUN_BAILIAN_API_KEY: str = Field(default="")
     ALIYUN_BAILIAN_BASE_URL: str = Field(

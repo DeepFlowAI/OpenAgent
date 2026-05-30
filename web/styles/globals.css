@@ -80,6 +80,15 @@ body {
   animation: streaming-dot 1.2s ease-in-out infinite;
 }
 
+.wmde-markdown video.markdown-video-player {
+  display: block;
+  width: 100%;
+  max-height: 360px;
+  margin: 8px 0;
+  border-radius: 8px;
+  background: #000000;
+}
+
 /* Visitor-site Markdown body — minimal Tailwind-friendly typography. */
 .prose-doc {
   color: #1a1a1a;

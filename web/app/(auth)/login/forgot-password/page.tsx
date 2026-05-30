@@ -4,6 +4,7 @@ import { Suspense, useState, useEffect, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { useSendVerificationCode, useResetPassword } from '@/service/use-auth'
+import { useSystemInfo } from '@/service/use-system'
 import { getErrorMessage } from '@/service/base'
 import { tenantLoginFieldError } from '@/lib/tenant-login-field'
 import { Button } from '@/app/components/base/button'
@@ -26,6 +27,8 @@ function ForgotPasswordContent() {
   const sendCodeMutation = useSendVerificationCode()
   const resetMutation = useResetPassword()
   const { toast } = useToast()
+  const { data: systemInfo } = useSystemInfo()
+  const singleTenantMode = systemInfo?.single_tenant_mode ?? false
 
   const [form, setForm] = useState({
     tenant: searchParams.get('tenant') || '',
@@ -46,6 +49,12 @@ function ForgotPasswordContent() {
     return () => clearTimeout(timer)
   }, [countdown])
 
+  useEffect(() => {
+    if (singleTenantMode && systemInfo) {
+      setForm((prev) => ({ ...prev, tenant: systemInfo.default_tenant_id }))
+    }
+  }, [singleTenantMode, systemInfo])
+
   const updateField = (field: string, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }))
     setErrors((prev) => ({ ...prev, [field]: '' }))
@@ -54,17 +63,21 @@ function ForgotPasswordContent() {
 
   const validateSendCode = useCallback((): boolean => {
     const errs: Record<string, string> = {}
-    const tenantErr = tenantLoginFieldError(form.tenant)
-    if (tenantErr) errs.tenant = tenantErr
+    if (!singleTenantMode) {
+      const tenantErr = tenantLoginFieldError(form.tenant)
+      if (tenantErr) errs.tenant = tenantErr
+    }
     if (!form.username) errs.username = '请输入账号'
     setErrors(errs)
     return Object.keys(errs).length === 0
-  }, [form.tenant, form.username])
+  }, [form.tenant, form.username, singleTenantMode])
 
   const validateAll = (): boolean => {
     const errs: Record<string, string> = {}
-    const tenantErr = tenantLoginFieldError(form.tenant)
-    if (tenantErr) errs.tenant = tenantErr
+    if (!singleTenantMode) {
+      const tenantErr = tenantLoginFieldError(form.tenant)
+      if (tenantErr) errs.tenant = tenantErr
+    }
     if (!form.username) errs.username = '请输入账号'
     if (!form.verifyCode) errs.verifyCode = '请输入验证码'
     else if (!/^\d{6}$/.test(form.verifyCode))
@@ -90,7 +103,7 @@ function ForgotPasswordContent() {
     if (!validateSendCode()) return
     try {
       await sendCodeMutation.mutateAsync({
-        tenant: form.tenant.trim(),
+        tenant: singleTenantMode ? form.tenant : form.tenant.trim(),
         username: form.username,
       })
       toast('验证码已发送至您的邮箱')
@@ -106,13 +119,17 @@ function ForgotPasswordContent() {
     if (!validateAll()) return
     try {
       await resetMutation.mutateAsync({
-        tenant: form.tenant.trim(),
+        tenant: singleTenantMode ? form.tenant : form.tenant.trim(),
         username: form.username,
         verify_code: form.verifyCode,
         new_password: form.newPassword,
       })
       toast('密码重置成功，请使用新密码登录')
       setTimeout(() => {
+        if (singleTenantMode) {
+          router.push('/login')
+          return
+        }
         const t = form.tenant.trim()
         router.push(`/login${t ? `?tenant=${encodeURIComponent(t)}` : ''}`)
       }, 1500)
@@ -130,18 +147,20 @@ function ForgotPasswordContent() {
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-4">
-        <Input
-          id="forgot-tenant"
-          name="tenant"
-          label="企业 ID"
-          autoComplete="organization"
-          required
-          value={form.tenant}
-          onChange={(e) => updateField('tenant', e.target.value)}
-          error={errors.tenant}
-          placeholder="请输入企业 ID"
-          maxLength={64}
-        />
+        {!singleTenantMode && (
+          <Input
+            id="forgot-tenant"
+            name="tenant"
+            label="企业 ID"
+            autoComplete="organization"
+            required
+            value={form.tenant}
+            onChange={(e) => updateField('tenant', e.target.value)}
+            error={errors.tenant}
+            placeholder="请输入企业 ID"
+            maxLength={64}
+          />
+        )}
 
         <Input
           id="forgot-username"

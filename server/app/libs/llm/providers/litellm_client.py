@@ -39,6 +39,7 @@ _MAX_LOG_LEN = 2000
 # Short name -> LiteLLM model identifier (OpenRouter fallback)
 OPENROUTER_MODEL_MAP: dict[str, str] = {
     "gpt-4o": "openrouter/openai/gpt-4o",
+    "deepseek-v4-pro": "openrouter/deepseek/deepseek-v4-pro",
     "kimi-k2.5": "openrouter/moonshotai/kimi-k2.5",
     "kimi-k2.6": "openrouter/moonshotai/kimi-k2.6",
     "glm-5": "openrouter/z-ai/glm-5",
@@ -73,6 +74,12 @@ BAILIAN_MODEL_MAP: dict[str, str] = {
 }
 
 OFFICIAL_MODEL_MAP: dict[str, dict] = {
+    "deepseek-v4-pro": {
+        "channel": "deepseek-official",
+        "model": "openai/deepseek-v4-pro",
+        "api_key_setting": "DEEPSEEK_API_KEY",
+        "api_base_setting": "DEEPSEEK_API_BASE_URL",
+    },
     "minimax-m2.7": {
         "channel": "minimax-official",
         "model": "openai/MiniMax-M2.7",
@@ -101,6 +108,7 @@ SILICONFLOW_MODEL_MAP: dict[str, str] = {
 
 PROVIDER_CHANNEL_NAMES: dict[str, str] = {
     "aliyun-bailian": "阿里百炼",
+    "deepseek-official": "DeepSeek 官方",
     "minimax-official": "MiniMax 官方",
     "moonshot-official": "Kimi 官方",
     "zhipu-official": "智谱官方",
@@ -217,11 +225,27 @@ def _reasoning_details_text(value: object) -> str | None:
     return "\n".join(parts)
 
 
+def _strip_leading_orphan_think_close(text: object) -> str | None:
+    """Drop provider-leaked leading ``</think>`` control tags from visible text."""
+    if not isinstance(text, str):
+        return None
+
+    cleaned = text
+    while True:
+        stripped = cleaned.lstrip()
+        if not stripped.lower().startswith("</think>"):
+            return cleaned
+        cleaned = stripped[len("</think>"):].lstrip()
+        if not cleaned:
+            return None
+
+
 def _message_thinking_text(msg: object) -> str | None:
     """Collect reasoning/thinking from provider-specific message fields."""
     for attr in ("thinking_content", "reasoning_content", "reasoning"):
         v = getattr(msg, attr, None)
-        if isinstance(v, str) and v.strip():
+        v = _strip_leading_orphan_think_close(v)
+        if v and v.strip():
             return v
     rd = _reasoning_details_text(getattr(msg, "reasoning_details", None))
     if rd:
@@ -232,7 +256,8 @@ def _message_thinking_text(msg: object) -> str | None:
 def _delta_thinking_text(delta: object) -> str | None:
     for attr in ("thinking_content", "reasoning_content", "reasoning"):
         v = getattr(delta, attr, None)
-        if isinstance(v, str) and v:
+        v = _strip_leading_orphan_think_close(v)
+        if v:
             return v
     rd = _reasoning_details_text(getattr(delta, "reasoning_details", None))
     if rd:
@@ -250,6 +275,24 @@ def _truncate(obj: object, max_len: int = _MAX_LOG_LEN) -> str:
 def _resolve_model(model: str) -> str:
     """Map a short model name to a LiteLLM model identifier."""
     return OPENROUTER_MODEL_MAP.get(model, model)
+
+
+def _messages_for_channel(messages: list[dict], channel: str) -> list[dict]:
+    """Return request messages adjusted for provider-specific extensions."""
+    if channel == "deepseek-official":
+        return messages
+
+    changed = False
+    sanitized: list[dict] = []
+    for message in messages:
+        if "reasoning_content" not in message:
+            sanitized.append(message)
+            continue
+        item = dict(message)
+        item.pop("reasoning_content", None)
+        sanitized.append(item)
+        changed = True
+    return sanitized if changed else messages
 
 
 def _provider_base(resolved: str) -> dict:
@@ -377,6 +420,13 @@ def _apply_thinking(kwargs: dict, thinking_enabled: bool, resolved_model: str, c
     """Apply provider-specific reasoning params."""
     if channel == "openrouter":
         _apply_openrouter_thinking(kwargs, thinking_enabled, resolved_model)
+    elif channel == "deepseek-official":
+        _merge_extra_body(
+            kwargs,
+            {"thinking": {"type": "enabled" if thinking_enabled else "disabled"}},
+        )
+        if thinking_enabled:
+            kwargs["reasoning_effort"] = "high"
     elif channel == "minimax-official" and thinking_enabled:
         _merge_extra_body(kwargs, {"reasoning_split": True})
 
@@ -393,7 +443,7 @@ def _request_kwargs(
     """Build common LiteLLM request kwargs for one provider candidate."""
     kwargs: dict = {
         "model": candidate["model"],
-        "messages": messages,
+        "messages": _messages_for_channel(messages, candidate["channel"]),
         "temperature": candidate.get("temperature", temperature),
         "top_p": top_p,
         "max_tokens": max_tokens,
@@ -489,7 +539,7 @@ class LiteLLMClient(BaseLLMClient):
         thinking_text = _message_thinking_text(msg) if thinking_enabled else None
 
         result = LLMResponse(
-            content=msg.content,
+            content=_strip_leading_orphan_think_close(msg.content),
             thinking_content=thinking_text,
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason,
@@ -674,7 +724,7 @@ class LiteLLMClient(BaseLLMClient):
                 delta = choice.delta
                 finish_reason = choice.finish_reason
 
-                content = getattr(delta, "content", None)
+                content = _strip_leading_orphan_think_close(getattr(delta, "content", None))
                 # Drop reasoning locally when thinking is disabled — avoids
                 # passing OpenRouter reasoning suppression flags that are
                 # interpreted inconsistently and can break tool_calls.

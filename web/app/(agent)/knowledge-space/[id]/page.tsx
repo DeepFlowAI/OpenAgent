@@ -51,6 +51,7 @@ export default function KnowledgeBaseDetailPage({
   const runningLog = (logsData?.items ?? []).find((log) => log.status === 'running')
   const hasRunningSync = !!runningLog
   const syncDisabled = syncMutation.isPending || hasRunningSync
+  const trackedRunningSyncRef = useRef<number | null>(null)
 
   useEffect(() => {
     if (!hasRunningSync) {
@@ -58,6 +59,37 @@ export default function KnowledgeBaseDetailPage({
       void qc.invalidateQueries({ queryKey: documentKeys.lists() })
     }
   }, [hasRunningSync, kbId, qc])
+
+  useEffect(() => {
+    const logs = logsData?.items ?? []
+    const running = logs.find((log) => log.status === 'running')
+
+    if (running) {
+      trackedRunningSyncRef.current = running.id
+      return
+    }
+
+    const trackedId = trackedRunningSyncRef.current
+    if (trackedId == null) return
+
+    const finished = logs.find((log) => log.id === trackedId)
+    if (!finished || finished.status === 'running') return
+
+    trackedRunningSyncRef.current = null
+
+    if (finished.status === 'failed') {
+      const err = parseSyncLogDetails(finished).error || '同步失败'
+      toast(err, 'error')
+      return
+    }
+    if (finished.status === 'partial_success') {
+      toast('同步结束：部分文件解析失败，请查看解析日志', 'error')
+      return
+    }
+    if (finished.status === 'success') {
+      toast('同步完成', 'success')
+    }
+  }, [logsData, toast])
 
   useEffect(() => {
     if (!syncDropdownOpen) return
@@ -356,14 +388,20 @@ function DocumentsTab({
 
 function parseSyncLogDetails(log: SyncLog) {
   if (!log.details) {
-    return { sync_mode: undefined as string | undefined, progress: undefined as SyncProgress | undefined, files: [] as Array<{ file: string; status: string; error?: string; slice_count?: number }> }
+    return {
+      sync_mode: undefined as string | undefined,
+      progress: undefined as SyncProgress | undefined,
+      error: undefined as string | undefined,
+      files: [] as Array<{ file: string; status: string; error?: string; slice_count?: number }>,
+    }
   }
   if (Array.isArray(log.details)) {
-    return { sync_mode: undefined, progress: undefined, files: log.details }
+    return { sync_mode: undefined, progress: undefined, error: undefined, files: log.details }
   }
   return {
     sync_mode: log.details.sync_mode,
     progress: log.details.progress,
+    error: log.details.error,
     files: log.details.files ?? [],
   }
 }
@@ -552,6 +590,11 @@ function SyncTab({
                       共 {log.total_files} 个文件
                       {log.success_count != null && <> · <span className="text-emerald-600">{log.success_count} 成功</span></>}
                       {(log.error_count ?? 0) > 0 && <> · <span className="text-red-500">{log.error_count} 失败</span></>}
+                    </span>
+                  )}
+                  {parsed.error && (log.status === 'failed' || log.status === 'cancelled') && (
+                    <span className="text-xs text-red-600" title={parsed.error}>
+                      {parsed.error}
                     </span>
                   )}
                   {log.status === 'running' && (

@@ -9,7 +9,17 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.models.channel import Channel
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.conversation_step_repository import ConversationStepRepository
-from app.schemas.conversation_step import StepCreate, StepFeedbackSubmit, StepUpdate
+from app.schemas.agent_tool import (
+    HUMAN_HANDOFF_TOOL_TYPE,
+    normalize_human_handoff_arguments,
+)
+from app.schemas.conversation_step import (
+    StepCreate,
+    StepFeedbackSubmit,
+    StepUpdate,
+    ToolResultSubmit,
+)
+from app.services.human_handoff_event_service import create_human_handoff_event_step
 
 
 def _step_to_response_dict(step) -> dict:
@@ -174,6 +184,76 @@ class ConversationStepService:
                 )
 
         return step
+
+    @staticmethod
+    async def submit_tool_result(
+        db: AsyncSession,
+        conversation_id: int,
+        tenant_id: str,
+        agent_id: int,
+        data: ToolResultSubmit,
+    ):
+        """Attach an external result to a pending tool call."""
+        conversation = await ConversationRepository.get_by_id(db, conversation_id)
+        if (
+            not conversation
+            or conversation.tenant_id != tenant_id
+            or conversation.agent_id != agent_id
+        ):
+            raise NotFoundError("Conversation not found")
+
+        step = await ConversationStepRepository.get_tool_call_by_call_id(
+            db,
+            conversation_id,
+            data.tool_call_id,
+        )
+        if not step:
+            raise NotFoundError("Tool call not found")
+        if step.status not in {"pending", "running"}:
+            raise ValidationError("Tool result can only be submitted for pending tool calls")
+
+        event_tool_config = {}
+        if step.tool_type != HUMAN_HANDOFF_TOOL_TYPE:
+            raise ValidationError("Tool result status is only supported for human handoff calls")
+
+        should_create_handoff_event = data.status == "handoff_success"
+        if should_create_handoff_event:
+            metadata = step.metadata_ or {}
+            event_tool_config = (
+                metadata.get("tool_config") if isinstance(metadata, dict) else {}
+            ) or {}
+            try:
+                normalize_human_handoff_arguments(
+                    step.tool_arguments or {},
+                    event_tool_config,
+                )
+            except ValueError as exc:
+                raise ValidationError(str(exc)) from exc
+
+        result = data.message or ""
+        step_status = "success" if data.status == "handoff_success" else "error"
+        updated = await ConversationStepRepository.update(
+            db,
+            step,
+            {
+                "tool_response": result,
+                "status": step_status,
+                "error_message": None if step_status == "success" else result,
+            },
+        )
+
+        if should_create_handoff_event:
+            await create_human_handoff_event_step(
+                db,
+                conversation,
+                agent_id,
+                updated.round_number,
+                updated,
+                updated.tool_arguments or {},
+                event_tool_config,
+            )
+
+        return updated
 
     @staticmethod
     async def submit_public_feedback(

@@ -5,10 +5,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001/api/'
 /** 401 on these routes is expected (wrong password etc.); do not clear session or redirect. */
 function isCredentialAuthRequest(request: Request): boolean {
   const path = new URL(request.url).pathname
-  return (
-    path.endsWith('/v1/auth/login') ||
-    path.endsWith('/v1/auth/admin-login')
-  )
+  return path.endsWith('/v1/auth/login')
 }
 
 function isPublicRoute(): boolean {
@@ -23,9 +20,7 @@ const client = ky.create({
     beforeRequest: [
       (request) => {
         if (isPublicRoute()) return
-        const isAdminPath = window.location.pathname.startsWith('/admin')
-        const tokenKey = isAdminPath ? 'admin_auth_token' : 'auth_token'
-        const token = localStorage.getItem(tokenKey)
+        const token = localStorage.getItem('auth_token')
         if (token) request.headers.set('Authorization', `Bearer ${token}`)
       },
     ],
@@ -33,14 +28,8 @@ const client = ky.create({
       async (request, _options, response) => {
         if (isPublicRoute()) return
         if (response.status === 401 && !isCredentialAuthRequest(request)) {
-          const isAdminPath = window.location.pathname.startsWith('/admin')
-          if (isAdminPath) {
-            localStorage.removeItem('admin_auth_token')
-            window.location.href = '/admin/login'
-          } else {
-            localStorage.removeItem('auth_token')
-            window.location.href = '/login'
-          }
+          localStorage.removeItem('auth_token')
+          window.location.href = '/login'
         }
       },
     ],

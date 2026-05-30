@@ -4,7 +4,12 @@ Unit tests for ModelConfig backward compatibility (thinking_mode → split field
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.agent import ModelConfig, EngineConfig, EngineConfigUpdate
+from app.schemas.agent import (
+    ContextConfig,
+    ModelConfig,
+    EngineConfig,
+    EngineConfigUpdate,
+)
 
 
 DEFAULT_TOOL_CALL_LIMIT_REPLY = (
@@ -73,6 +78,27 @@ class TestModelConfigThinkingMigration:
         config = EngineConfig(**{**EngineConfig().model_dump(), **raw})
         assert config.model.first_round_thinking is False
         assert config.model.subsequent_rounds_thinking is False
+
+
+class TestContextConfig:
+
+    def test_max_tool_loop_rounds_defaults_to_20(self):
+        config = ContextConfig()
+
+        assert config.max_tool_loop_rounds == 20
+
+    def test_max_tool_loop_rounds_accepts_custom_value(self):
+        config = ContextConfig(max_tool_loop_rounds=3)
+
+        assert config.max_tool_loop_rounds == 3
+
+    def test_max_tool_loop_rounds_must_be_positive(self):
+        with pytest.raises(ValidationError):
+            ContextConfig(max_tool_loop_rounds=0)
+
+    def test_max_tool_loop_rounds_caps_at_100(self):
+        with pytest.raises(ValidationError):
+            ContextConfig(max_tool_loop_rounds=101)
 
 
 class TestConversationSettingsConfig:

@@ -1,11 +1,9 @@
 """Public system info — UX hints for the frontend.
 
 This endpoint is intentionally **not** an authorisation gate. It tells the
-frontend whether to render multi-tenant UI (login form's tenant field, tenant
-admin pages, etc.). The actual authority over multi-tenant features comes
-from whether the closed-source ``tenants`` extension is loaded — which
-itself is controlled by file-system presence of the extension package, not
-by any config flag.
+frontend whether to render multi-tenant login UI (tenant field on login /
+forgot-password). Tenant CRUD is handled by an external Tenant Platform via
+``X-API-Key``; this web app does not expose tenant admin pages.
 
 OSS deployments never see closed-source extensions, so ``single_tenant_mode``
 is always ``true`` for them.

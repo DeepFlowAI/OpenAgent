@@ -23,6 +23,23 @@ class ConversationStepRepository:
         return await db.get(ConversationStep, step_id)
 
     @staticmethod
+    async def get_tool_call_by_call_id(
+        db: AsyncSession,
+        conversation_id: int,
+        tool_call_id: str,
+    ) -> ConversationStep | None:
+        result = await db.execute(
+            select(ConversationStep)
+            .where(
+                ConversationStep.conversation_id == conversation_id,
+                ConversationStep.step_type == "tool_call",
+                ConversationStep.tool_call_id == tool_call_id,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
     async def get_timeline(
         db: AsyncSession,
         conversation_id: int,

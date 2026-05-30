@@ -2,11 +2,15 @@ type HastLikeElement = {
   type: string
   tagName?: string
   properties?: Record<string, unknown>
-  children?: Array<{
-    type?: string
-    tagName?: string
-    properties?: Record<string, unknown>
-  }>
+  children?: HastLikeNode[]
+}
+
+type HastLikeNode = {
+  type?: string
+  tagName?: string
+  value?: string
+  properties?: Record<string, unknown>
+  children?: HastLikeNode[]
 }
 
 export type MarkdownLinkPropsResolver = (href: string) => {
@@ -14,10 +18,70 @@ export type MarkdownLinkPropsResolver = (href: string) => {
   rel?: string
 }
 
+function isMp4VideoUrl(href: string) {
+  const trimmed = href.trim()
+  if (!trimmed || trimmed.startsWith('#')) return false
+
+  const isRelativeUrl =
+    trimmed.startsWith('/') ||
+    trimmed.startsWith('./') ||
+    trimmed.startsWith('../')
+
+  try {
+    const parsed = isRelativeUrl
+      ? new URL(trimmed, 'https://markdown.local')
+      : new URL(trimmed)
+    if (!isRelativeUrl && !['http:', 'https:'].includes(parsed.protocol)) {
+      return false
+    }
+    return parsed.pathname.toLowerCase().endsWith('.mp4')
+  } catch {
+    return false
+  }
+}
+
+function getPlainText(nodes: HastLikeNode[] | undefined): string {
+  if (!nodes) return ''
+  return nodes
+    .map((child) => {
+      if (child.type === 'text') return child.value ?? ''
+      return getPlainText(child.children)
+    })
+    .join('')
+}
+
+function rewriteVideoLink(el: HastLikeElement, href: string) {
+  const label = getPlainText(el.children).trim()
+  el.tagName = 'video'
+  el.properties = {
+    className: ['markdown-video-player'],
+    controls: true,
+    preload: 'metadata',
+    playsInline: true,
+    ...(label ? { ariaLabel: label } : {}),
+  }
+  el.children = [
+    {
+      type: 'element',
+      tagName: 'source',
+      properties: {
+        src: href,
+        type: 'video/mp4',
+      },
+      children: [],
+    },
+    {
+      type: 'text',
+      value: label || '您的浏览器不支持视频播放。',
+    },
+  ]
+}
+
 /**
  * Strips heading permalink anchors injected by @uiw/react-markdown-preview
  * (rehype-slug + rehype-autolink-headings). Pass as `rehypeRewrite` on MarkdownPreview.
  * Also makes user-facing markdown links open outside the embedded chat iframe.
+ * MP4 markdown links are upgraded to inline playable videos.
  */
 function rewriteMarkdownLinksAndHeadings(
   node: HastLikeElement | { type: string },
@@ -30,6 +94,10 @@ function rewriteMarkdownLinksAndHeadings(
 
   if (el.tagName === 'a') {
     const href = typeof el.properties?.href === 'string' ? el.properties.href : ''
+    if (href && isMp4VideoUrl(href)) {
+      rewriteVideoLink(el, href.trim())
+      return
+    }
     if (href && !href.startsWith('#')) {
       el.properties = {
         ...el.properties,

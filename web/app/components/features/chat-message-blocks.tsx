@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, type MouseEvent } from 'react'
 import dynamic from 'next/dynamic'
 import { cn } from '@/utils/classnames'
 import {
@@ -8,6 +8,10 @@ import {
   stripMarkdownHeadingAnchorsRehypeRewrite,
 } from '@/utils/strip-markdown-heading-anchors'
 import { getSamePageNavigationLinkProps } from '@/utils/same-page-navigation-allowlist'
+import {
+  isWeixinMiniProgramUrl,
+  openWeixinMiniProgramLink,
+} from '@/utils/wx-mini-program'
 import {
   IconChevronDown,
   IconChevronRight,
@@ -49,11 +53,14 @@ const SAFE_MARKDOWN_TAGS = new Set([
   'thead',
   'tr',
   'ul',
+  'source',
+  'video',
 ])
 
 function safeMarkdownUrlTransform(url: string) {
   const trimmed = url.trim()
   if (!trimmed) return ''
+  if (isWeixinMiniProgramUrl(trimmed)) return trimmed
   if (
     trimmed.startsWith('#') ||
     trimmed.startsWith('/') ||
@@ -76,6 +83,25 @@ function safeMarkdownUrlTransform(url: string) {
 function safeMarkdownAllowElement(element: { tagName?: string }) {
   const tagName = element.tagName?.toLowerCase()
   return Boolean(tagName && SAFE_MARKDOWN_TAGS.has(tagName))
+}
+
+function getWeixinMiniProgramUrlFromClick(target: EventTarget | null) {
+  if (!(target instanceof Element)) return null
+  const link = target.closest('a[href]')
+  const href = link?.getAttribute('href')?.trim()
+  return href && isWeixinMiniProgramUrl(href) ? href : null
+}
+
+function useWeixinMiniProgramClickHandler() {
+  return useCallback((event: MouseEvent<HTMLDivElement>) => {
+    const url = getWeixinMiniProgramUrlFromClick(event.target)
+    if (!url) return
+
+    event.preventDefault()
+    void openWeixinMiniProgramLink(url, () => {
+      window.alert('请在微信小程序中打开此功能')
+    })
+  }, [])
 }
 
 function safeMarkdownPluginsFilter(
@@ -287,6 +313,8 @@ export function InlineContentUI({
 }) {
   const displayText = useTypewriter(block.content, block.isStreaming)
   const hasText = Boolean(block.content.trim())
+  const handleClick = useWeixinMiniProgramClickHandler()
+
   if (!hasText && !block.isStreaming) return null
 
   return (
@@ -295,6 +323,7 @@ export function InlineContentUI({
         <div
           className="text-sm leading-relaxed text-[#1A1A1A]"
           data-color-mode="light"
+          onClick={handleClick}
         >
           <MarkdownPreview
             source={displayText}
@@ -329,6 +358,7 @@ export function MarkdownContent({
   style?: React.CSSProperties
   samePageNavigationUrlAllowlist?: readonly string[]
 }) {
+  const handleClick = useWeixinMiniProgramClickHandler()
   const rehypeRewrite = useMemo(() => {
     if (!samePageNavigationUrlAllowlist?.length) {
       return stripMarkdownHeadingAnchorsRehypeRewrite
@@ -340,7 +370,7 @@ export function MarkdownContent({
 
   return (
     // leading-[26px] matches chat user bubble; avoid leading-relaxed stacking with @uiw .wmde-markdown { line-height: 1.5 }
-    <div className="text-sm leading-[26px]" data-color-mode="light">
+    <div className="text-sm leading-[26px]" data-color-mode="light" onClick={handleClick}>
       <MarkdownPreview
         source={source}
         style={{ background: 'transparent', fontSize: 14, ...style }}

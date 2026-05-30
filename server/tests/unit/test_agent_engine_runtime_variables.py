@@ -194,8 +194,7 @@ async def test_build_history_applies_recent_full_tool_response_limit(monkeypatch
     ]
 
 
-def test_runtime_template_vars_track_tool_progress(monkeypatch):
-    monkeypatch.setattr(svc, "MAX_TOOL_ROUNDS", 20)
+def test_runtime_template_vars_track_tool_progress():
     history = svc._HistoryMessages(
         [],
         loaded_round_count=2,
@@ -208,6 +207,7 @@ def test_runtime_template_vars_track_tool_progress(monkeypatch):
                 "max_rounds": 2,
                 "history_tool_rounds": 1,
                 "recent_full_tool_responses": 4,
+                "max_tool_loop_rounds": 7,
             }
         ),
         round_number=3,
@@ -228,8 +228,8 @@ def test_runtime_template_vars_track_tool_progress(monkeypatch):
     assert variables["llm_call_index_in_round"] == "2"
     assert variables["completed_tool_call_count_in_round"] == "1"
     assert variables["next_tool_call_index_in_round"] == "2"
-    assert variables["max_tool_loop_rounds"] == "20"
-    assert variables["remaining_tool_loop_rounds"] == "19"
+    assert variables["max_tool_loop_rounds"] == "7"
+    assert variables["remaining_tool_loop_rounds"] == "6"
 
 
 @pytest.mark.asyncio
@@ -246,12 +246,14 @@ async def test_system_prompt_runtime_variables_rerender_each_llm_call(monkeypatc
                 "llm={{llm_call_index_in_round}} "
                 "done_tools={{completed_tool_call_count_in_round}} "
                 "next_tool={{next_tool_call_index_in_round}} "
+                "max={{max_tool_loop_rounds}} "
                 "remaining={{remaining_tool_loop_rounds}}"
             ),
             "context": {
                 "max_rounds": 2,
                 "history_tool_rounds": 1,
                 "recent_full_tool_responses": 4,
+                "max_tool_loop_rounds": 3,
             },
             "selected_tool_ids": [1],
         })
@@ -380,6 +382,6 @@ async def test_system_prompt_runtime_variables_rerender_each_llm_call(monkeypatc
         pass
 
     assert captured_system_prompts == [
-        "round=3 history=2 trace=1 llm=1 done_tools=0 next_tool=1 remaining=20",
-        "round=3 history=2 trace=1 llm=2 done_tools=1 next_tool=2 remaining=19",
+        "round=3 history=2 trace=1 llm=1 done_tools=0 next_tool=1 max=3 remaining=3",
+        "round=3 history=2 trace=1 llm=2 done_tools=1 next_tool=2 max=3 remaining=2",
     ]

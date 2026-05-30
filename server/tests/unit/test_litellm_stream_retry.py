@@ -28,7 +28,15 @@ from app.libs.llm.providers import litellm_client
 # ── Test doubles ──────────────────────────────────────────────────────
 
 
-def _chunk(content: str | None = None, finish_reason: str | None = None):
+def _chunk(
+    content: str | None = None,
+    finish_reason: str | None = None,
+    *,
+    tool_calls: list | None = None,
+    thinking_content: str | None = None,
+    reasoning_content: str | None = None,
+    reasoning: str | None = None,
+):
     """Build a minimal LiteLLM-shaped SSE chunk."""
     return SimpleNamespace(
         id="resp-id",
@@ -39,11 +47,11 @@ def _chunk(content: str | None = None, finish_reason: str | None = None):
                 finish_reason=finish_reason,
                 delta=SimpleNamespace(
                     content=content,
-                    tool_calls=None,
+                    tool_calls=tool_calls,
                     reasoning_details=None,
-                    thinking_content=None,
-                    reasoning_content=None,
-                    reasoning=None,
+                    thinking_content=thinking_content,
+                    reasoning_content=reasoning_content,
+                    reasoning=reasoning,
                 ),
             )
         ],
@@ -146,6 +154,69 @@ async def test_clean_stream_has_no_incomplete_reason(monkeypatch):
     assert result.incomplete_reason is None
     assert result.finish_reason == "stop"
     assert result.content == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_orphan_think_close_content_is_dropped_before_tool_call(monkeypatch):
+    tool_call = SimpleNamespace(
+        index=0,
+        id="call_1",
+        function=SimpleNamespace(
+            name="knowledge_search",
+            arguments='{"query":"ECE R13"}',
+        ),
+    )
+    fake_acompletion = await _run(
+        _ScriptedStream([
+            {
+                "chunk": _chunk(
+                    content="</think>",
+                    tool_calls=[tool_call],
+                    finish_reason="tool_calls",
+                )
+            },
+        ])
+    )
+    monkeypatch.setattr(litellm_client.litellm, "acompletion", fake_acompletion)
+
+    stream, result = await litellm_client.LiteLLMClient().stream_chat(
+        [{"role": "user", "content": "hi"}],
+        model="minimax-m2.7",
+    )
+    deltas = [d async for d in stream]
+
+    assert [d.content for d in deltas] == [None]
+    assert result.content == ""
+    assert result.finish_reason == "tool_calls"
+    assert result.tool_calls == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "knowledge_search",
+                "arguments": '{"query":"ECE R13"}',
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_orphan_think_close_prefix_is_stripped_from_visible_content(monkeypatch):
+    fake_acompletion = await _run(
+        _ScriptedStream([
+            {"chunk": _chunk(content="</think>visible", finish_reason="stop")},
+        ])
+    )
+    monkeypatch.setattr(litellm_client.litellm, "acompletion", fake_acompletion)
+
+    stream, result = await litellm_client.LiteLLMClient().stream_chat(
+        [{"role": "user", "content": "hi"}],
+        model="minimax-m2.7",
+    )
+    deltas = [d async for d in stream]
+
+    assert [d.content for d in deltas if d.content] == ["visible"]
+    assert result.content == "visible"
 
 
 @pytest.mark.asyncio

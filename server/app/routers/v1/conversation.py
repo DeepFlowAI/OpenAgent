@@ -2,12 +2,16 @@
 Conversation router — conversation list and detail APIs
 """
 from datetime import datetime, timezone
+import json
+import logging
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.deps import get_db, require_scope
 from app.core.exceptions import NotFoundError
+from app.routers.v1.sse import with_sse_heartbeat
 from app.schemas.channel import ChannelOptionListResponse
 from app.schemas.conversation import (
     ConversationCreate,
@@ -15,7 +19,11 @@ from app.schemas.conversation import (
     ConversationDetailResponse,
     ConversationListResponse,
 )
+from app.schemas.conversation_step import ToolResultSubmit
+from app.services.agent_engine_service import AgentEngineService
 from app.services.conversation_service import ConversationService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/agents/{agent_id}/conversations", tags=["Conversations"]
@@ -153,3 +161,44 @@ async def end_conversation(
     if conv["tenant_id"] != tenant_id:
         raise NotFoundError("Conversation not found")
     return await ConversationService.end_conversation(db, conversation_id)
+
+
+@router.post("/{conversation_id}/tool-results")
+async def submit_tool_result(
+    agent_id: int,
+    conversation_id: int,
+    body: ToolResultSubmit,
+    request: Request,
+    tenant_id: str = Depends(require_scope("chat")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Submit the external result for a pending tool call."""
+    async def event_generator():
+        try:
+            stream = AgentEngineService.submit_tool_result_stream(
+                db,
+                agent_id=agent_id,
+                conversation_id=conversation_id,
+                tenant_id=tenant_id,
+                data=body,
+                is_disconnected_cb=request.is_disconnected,
+            )
+            async for event in with_sse_heartbeat(stream):
+                yield event
+        except Exception as exc:
+            logger.exception("Tool result stream error")
+            yield _sse("error", {"message": str(exc)})
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"

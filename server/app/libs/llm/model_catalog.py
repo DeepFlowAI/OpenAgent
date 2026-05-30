@@ -14,6 +14,7 @@ class UiModelOption:
 # Default catalog when LLM_UI_MODELS is unset (matches legacy frontend list).
 DEFAULT_UI_MODELS: tuple[UiModelOption, ...] = (
     UiModelOption("gpt-4o", "GPT-4o"),
+    UiModelOption("deepseek-v4-pro", "DeepSeek V4 Pro"),
     UiModelOption("kimi-k2.5", "Kimi K2.5"),
     UiModelOption("kimi-k2.6", "Kimi K2.6"),
     UiModelOption("glm-5", "GLM-5"),

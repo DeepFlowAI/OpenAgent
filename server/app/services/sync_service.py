@@ -12,6 +12,7 @@ import hashlib
 import logging
 import os
 import tempfile
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -186,22 +187,143 @@ class SyncProgressReporter:
             )
 
 
+def _kb_sync_lock_keys(kb_id: int) -> dict[str, int]:
+    return {"k1": int(kb_id), "k2": _KB_SYNC_LOCK_KEY2}
+
+
+async def _release_kb_sync_lock(conn, kb_id: int) -> None:
+    """Release session advisory lock; best-effort if the connection is dying."""
+    keys = _kb_sync_lock_keys(kb_id)
+    try:
+        await conn.execute(
+            text("SELECT pg_advisory_unlock(:k1, :k2)"),
+            keys,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Do not call pg_advisory_unlock_all() — the same session may hold
+        # unrelated advisory locks (e.g. conversation round locks).
+        logger.warning(
+            "Failed to release KB sync advisory lock kb_id=%s: %s; "
+            "caller should invalidate the connection",
+            kb_id, exc,
+        )
+
+
+async def _invalidate_db_connection(db: AsyncSession) -> None:
+    """Drop pooled connection after sync so leaked advisory locks cannot linger."""
+    try:
+        conn = await db.connection()
+        await conn.invalidate()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to invalidate DB connection after sync: %s", exc)
+
+
+async def _probe_kb_sync_lock(db: AsyncSession, kb_id: int) -> bool:
+    """Return True when no other session holds this KB's sync advisory lock."""
+    conn = await db.connection()
+    acquired = bool((await conn.execute(
+        text("SELECT pg_try_advisory_lock(:k1, :k2)"),
+        _kb_sync_lock_keys(kb_id),
+    )).scalar())
+    if acquired:
+        await _release_kb_sync_lock(conn, kb_id)
+    return acquired
+
+
+async def _clear_orphaned_kb_sync_lock(db: AsyncSession, kb_id: int) -> int:
+    """Terminate idle backends still holding this KB's sync lock (pool leak recovery)."""
+    result = await db.execute(
+        text("""
+            SELECT l.pid
+            FROM pg_locks l
+            JOIN pg_stat_activity a ON a.pid = l.pid
+            WHERE l.locktype = 'advisory'
+              AND l.classid = :k1
+              AND l.objid = :k2
+              AND a.pid <> pg_backend_pid()
+              AND a.state = 'idle'
+              AND now() - COALESCE(a.state_change, a.backend_start)
+                  > interval '2 minutes'
+        """),
+        _kb_sync_lock_keys(kb_id),
+    )
+    pids = [int(row[0]) for row in result]
+    for pid in pids:
+        await db.execute(
+            text("SELECT pg_terminate_backend(:pid)"),
+            {"pid": pid},
+        )
+    if pids:
+        logger.warning(
+            "Cleared orphaned KB sync advisory lock kb_id=%s pids=%s",
+            kb_id, pids,
+        )
+    return len(pids)
+
+
+async def _ensure_kb_sync_available(db: AsyncSession, kb_id: int) -> None:
+    """Raise ConflictError when a real sync holds the lock; recover stale pool locks."""
+    if await _probe_kb_sync_lock(db, kb_id):
+        return
+    if await SyncLogRepository.has_running(db, kb_id):
+        raise ConflictError("Knowledge base sync is already in progress")
+    await _clear_orphaned_kb_sync_lock(db, kb_id)
+    if not await _probe_kb_sync_lock(db, kb_id):
+        raise ConflictError("Knowledge base sync is already in progress")
+
+
 @asynccontextmanager
 async def _kb_sync_lock(db: AsyncSession, kb_id: int):
     """One active sync per knowledge base; 409 if another job holds the lock."""
-    result = await db.execute(
+    conn = await db.connection()
+    acquired = bool((await conn.execute(
         text("SELECT pg_try_advisory_lock(:k1, :k2)"),
-        {"k1": int(kb_id), "k2": _KB_SYNC_LOCK_KEY2},
-    )
-    if not bool(result.scalar()):
+        _kb_sync_lock_keys(kb_id),
+    )).scalar())
+    if not acquired:
         raise ConflictError("Knowledge base sync is already in progress")
     try:
         yield
     finally:
-        await db.execute(
-            text("SELECT pg_advisory_unlock(:k1, :k2)"),
-            {"k1": int(kb_id), "k2": _KB_SYNC_LOCK_KEY2},
-        )
+        await _release_kb_sync_lock(conn, kb_id)
+
+
+@asynccontextmanager
+async def _kb_sync_lock_with_recovery(
+    db: AsyncSession, kb_id: int, sync_log_id: int,
+):
+    """Acquire KB sync lock; on acquire failure clear pool orphans and retry once."""
+    last_exc = ConflictError("Knowledge base sync is already in progress")
+    for attempt in range(2):
+        conn = await db.connection()
+        acquired = bool((await conn.execute(
+            text("SELECT pg_try_advisory_lock(:k1, :k2)"),
+            _kb_sync_lock_keys(kb_id),
+        )).scalar())
+        if acquired:
+            try:
+                yield
+            finally:
+                await _release_kb_sync_lock(conn, kb_id)
+            return
+        if attempt == 0:
+            running = await SyncLogRepository.get_latest_running(db, kb_id)
+            if running is not None and running.id != sync_log_id:
+                raise last_exc
+            await _clear_orphaned_kb_sync_lock(db, kb_id)
+            continue
+    raise last_exc
+
+
+async def _run_under_kb_sync_lock(
+    db: AsyncSession,
+    kb_id: int,
+    sync_log_id: int,
+    job: Callable[[], Awaitable[None]],
+) -> None:
+    """Run sync work under the KB lock (job errors are not retried)."""
+    async with _kb_sync_lock_with_recovery(db, kb_id, sync_log_id):
+        await job()
 
 
 # ---------------------------------------------------------------------------
@@ -285,11 +407,12 @@ class SyncService:
         if not kb or kb.status == "deleted":
             raise NotFoundError("Knowledge base not found")
 
-        await SyncLogRepository.cancel_stale_running(
-            db, kb_id, reason="superseded by new sync job",
-        )
+        await _ensure_kb_sync_available(db, kb_id)
+
         if await SyncLogRepository.has_running(db, kb_id):
-            raise ConflictError("Knowledge base sync is already in progress")
+            await SyncLogRepository.cancel_stale_running(
+                db, kb_id, reason="superseded by new sync job",
+            )
 
         sync_log = await SyncLogRepository.create(db, {
             "knowledge_base_id": kb.id,
@@ -373,7 +496,7 @@ class SyncService:
 
         async with AsyncSessionLocal() as db:
             try:
-                async with _kb_sync_lock(db, kb_id):
+                async def _job() -> None:
                     kb = await KnowledgeBaseRepository.get_by_id(db, kb_id)
                     if not kb or kb.status == "deleted":
                         raise NotFoundError("Knowledge base not found")
@@ -384,6 +507,8 @@ class SyncService:
                         force_full=force_full,
                         sync_log_id=sync_log_id,
                     )
+
+                await _run_under_kb_sync_lock(db, kb_id, sync_log_id, _job)
             except SyncCancelledError:
                 logger.info(
                     "Background sync kb_id=%s log=%s cancelled",
@@ -413,6 +538,8 @@ class SyncService:
                     kb_id, sync_log_id,
                 )
                 await SyncService._finalize_failed_sync(db, sync_log_id, exc)
+            finally:
+                await _invalidate_db_connection(db)
 
     @staticmethod
     async def _run_sync_job(

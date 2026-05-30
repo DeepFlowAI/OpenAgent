@@ -452,7 +452,7 @@ export default function BasicSettingsPage() {
               上下文与工具轨迹 / Context & Tool Trace
             </h3>
           </div>
-          <div className="grid grid-cols-3 gap-5">
+          <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-4">
             {/* Max rounds M */}
             <div>
               <label className="mb-1.5 block text-[13px] font-medium text-[#18181B]">
@@ -501,6 +501,23 @@ export default function BasicSettingsPage() {
                 max={5}
                 className="w-full rounded-lg border border-[#E4E4E7] px-3 py-2 text-sm text-[#18181B] outline-none focus:border-[#18181B]"
               />
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-[13px] font-medium text-[#18181B]">
+                单轮工具循环上限
+              </label>
+              <input
+                type="number"
+                value={config.context.max_tool_loop_rounds}
+                onChange={(e) =>
+                  updateContext('max_tool_loop_rounds', parseInt(e.target.value) || 1)
+                }
+                min={1}
+                max={100}
+                className="w-full rounded-lg border border-[#E4E4E7] px-3 py-2 text-sm text-[#18181B] outline-none focus:border-[#18181B]"
+              />
+              <p className="mt-1 text-xs text-[#A1A1AA]">默认 20，最高 100</p>
             </div>
           </div>
         </section>

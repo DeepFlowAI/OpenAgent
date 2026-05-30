@@ -213,6 +213,13 @@ class StepUpdate(BaseModel):
     error_message: str | None = None
 
 
+class ToolResultSubmit(BaseModel):
+    """External result for a pending tool call."""
+    tool_call_id: str = Field(..., min_length=1, max_length=128)
+    status: str = Field(..., pattern=r"^(handoff_success|handoff_failed)$")
+    message: str | None = Field(None, max_length=32000)
+
+
 class StepFeedbackSubmit(BaseModel):
     """Visitor feedback payload for one assistant_message step."""
     rating: str = Field(..., pattern=r"^(like|dislike)$")

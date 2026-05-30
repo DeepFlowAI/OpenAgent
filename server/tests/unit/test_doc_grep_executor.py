@@ -113,7 +113,10 @@ class TestDocGrepToolExecutor:
 
         assert 'total_matches="25"' in result
         assert 'showing="20"' in result
-        assert result.count("<match line=") == 20
+        assert result.count("<match line=") == 1
+        assert '<match line="1">' in result
+        assert "20| hit 19" in result
+        assert "21| hit 20" not in result
 
     @pytest.mark.asyncio
     async def test_execute_returns_error_for_invalid_pattern(self):

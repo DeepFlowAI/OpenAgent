@@ -52,6 +52,7 @@ class ContextConfig(BaseModel):
     max_rounds: int = Field(default=0, ge=0)
     history_tool_rounds: int = Field(default=0, ge=0, le=5)
     recent_full_tool_responses: int = Field(default=1, ge=1, le=5)
+    max_tool_loop_rounds: int = Field(default=20, ge=1, le=100)
 
 
 class PreRecallConfig(BaseModel):

@@ -47,7 +47,7 @@ type FilterRow = {
   level: string
   field: string
   op: string
-  value: string
+  value: string | string[]
 }
 
 type CategoryGroup = {
@@ -239,34 +239,42 @@ function EnumValueSelect({
   multi,
   onChange,
 }: {
-  value: string
+  value: string | string[]
   options: string[]
   multi?: boolean
-  onChange: (v: string) => void
+  onChange: (v: string | string[]) => void
 }) {
   if (multi) {
-    const selected = value ? value.split(',').filter(Boolean) : []
+    const selected = Array.isArray(value)
+      ? value
+      : value
+        ? value.split(',').filter(Boolean)
+        : []
     const anchor = useComboboxAnchor()
 
     return (
       <div className="w-[200px] shrink-0">
         <Combobox
+          key="multi"
           multiple
           autoHighlight
           items={options}
           value={selected}
-          onValueChange={(vals: string[]) => onChange(vals.join(','))}
+          onValueChange={(vals: string[]) => onChange(vals)}
         >
           <ComboboxChips ref={anchor}>
             <ComboboxValue>
-              {(vals: string[] | null) => (
-                <>
-                  {(vals ?? []).map((v: string) => (
-                    <ComboboxChip key={v}>{v}</ComboboxChip>
-                  ))}
-                  <ComboboxChipsInput placeholder="搜索..." />
-                </>
-              )}
+              {(vals: string[] | string | null) => {
+                const chips = Array.isArray(vals) ? vals : vals ? [vals] : []
+                return (
+                  <>
+                    {chips.map((v: string) => (
+                      <ComboboxChip key={v}>{v}</ComboboxChip>
+                    ))}
+                    <ComboboxChipsInput placeholder="搜索..." />
+                  </>
+                )
+              }}
             </ComboboxValue>
           </ComboboxChips>
           <ComboboxContent anchor={anchor}>
@@ -284,11 +292,14 @@ function EnumValueSelect({
     )
   }
 
+  const scalarValue = Array.isArray(value) ? (value[0] ?? '') : value
+
   return (
     <div className="w-[200px] shrink-0">
       <Combobox
+        key="single"
         items={options}
-        value={value || null}
+        value={scalarValue || null}
         onValueChange={(v: string | null) => onChange(v ?? '')}
       >
         <ComboboxInput placeholder="选择值" />
@@ -459,6 +470,7 @@ function FilterRowEditor({
   const fieldType = currentFieldDef?.type
   const operators = getOperatorsForType(fieldType)
   const normalisedOp = normaliseOp(row.op)
+  const rowValue = Array.isArray(row.value) ? row.value.join(',') : row.value
 
   const handleFieldChange = (field: string) => {
     const nextDef = fieldDefs?.find((d) => d.name === field)
@@ -485,7 +497,7 @@ function FilterRowEditor({
     if (fieldType === 'boolean') {
       return (
         <BooleanValueSelect
-          value={row.value}
+          value={rowValue}
           onChange={(v) => onUpdate(index, { ...row, value: v })}
         />
       )
@@ -494,7 +506,7 @@ function FilterRowEditor({
       return (
         <input
           type="number"
-          value={row.value}
+          value={rowValue}
           onChange={(e) => onUpdate(index, { ...row, value: e.target.value })}
           step={fieldType === 'float' ? '0.01' : '1'}
           placeholder="值"
@@ -506,7 +518,7 @@ function FilterRowEditor({
       return (
         <input
           type="date"
-          value={row.value}
+          value={rowValue}
           onChange={(e) => onUpdate(index, { ...row, value: e.target.value })}
           className="h-8 min-w-0 flex-1 rounded border border-[#E4E4E7] px-2 text-xs text-[#18181B] outline-none"
         />
@@ -515,7 +527,7 @@ function FilterRowEditor({
     if (fieldType === 'keyword[]' || fieldType === 'integer[]') {
       return (
         <TagValueInput
-          value={row.value}
+          value={rowValue}
           suggestions={currentFieldDef?.values}
           onChange={(v) => onUpdate(index, { ...row, value: v })}
         />
@@ -524,7 +536,7 @@ function FilterRowEditor({
     return (
       <input
         type="text"
-        value={row.value}
+        value={rowValue}
         onChange={(e) => onUpdate(index, { ...row, value: e.target.value })}
         placeholder="值"
         className="h-8 min-w-0 flex-1 rounded border border-[#E4E4E7] px-2 text-xs text-[#18181B] outline-none placeholder:text-[#A1A1AA]"
@@ -569,7 +581,13 @@ function FilterRowEditor({
       )}
       <select
         value={normalisedOp}
-        onChange={(e) => onUpdate(index, { ...row, op: e.target.value })}
+        onChange={(e) => {
+          const nextOp = e.target.value
+          const nextValue = nextOp === 'in'
+            ? (Array.isArray(row.value) ? row.value : row.value ? [row.value] : [])
+            : (Array.isArray(row.value) ? (row.value[0] ?? '') : row.value)
+          onUpdate(index, { ...row, op: nextOp, value: nextValue })
+        }}
         className="h-8 w-[110px] shrink-0 rounded border border-[#E4E4E7] bg-white px-2 text-xs text-[#18181B] outline-none"
       >
         {operators.map((op) => (

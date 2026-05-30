@@ -142,10 +142,10 @@ def normalize_filter_node(node: FilterNode) -> FilterNode:
             ],
         )
 
-    # The console serializes multi-tag keyword[] selections as one
-    # comma-separated string ("a,b,c"). Without splitting, has_any/has_all
-    # would compare against a single literal "a,b,c" and never match.
-    if op in ("has_any", "has_all"):
+    # Older console builds serialized multi selections as one comma-separated
+    # string ("a,b,c"). Split them before SQL generation so each value matches
+    # independently.
+    if op in ("in", "has_any", "has_all"):
         val = node.value
         if isinstance(val, str) and "," in val:
             parts = [p.strip() for p in val.split(",") if p.strip()]

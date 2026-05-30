@@ -19,6 +19,7 @@ import { MarkdownContent } from '@/app/components/features/chat-message-blocks'
 import { WelcomeEmbedFrame } from '@/app/components/features/welcome-embed-frame'
 import {
   DEFAULT_CONVERSATION_SETTINGS,
+  DEFAULT_ENGINE_CONFIG,
   type ConversationSettingsConfig,
   type WelcomeMessageBlock,
 } from '@/models/agent'
@@ -243,6 +244,13 @@ export default function ConversationSettingsPage() {
   const validBlocks = blocks.filter(isValidWelcomeBlock)
   const aiDisclaimerEnabled = config.ai_disclaimer.enabled
   const toolCallLimitReplyEnabled = config.tool_call_limit_reply.enabled
+  const configuredMaxToolLoopRounds = Number(
+    agent?.engine_config?.context?.max_tool_loop_rounds,
+  )
+  const maxToolLoopRounds =
+    Number.isFinite(configuredMaxToolLoopRounds) && configuredMaxToolLoopRounds > 0
+      ? Math.trunc(configuredMaxToolLoopRounds)
+      : DEFAULT_ENGINE_CONFIG.context.max_tool_loop_rounds
 
   return (
     <div className="flex h-full flex-col bg-white">
@@ -411,7 +419,7 @@ export default function ConversationSettingsPage() {
           {toolCallLimitReplyEnabled && (
             <div className="mt-6 space-y-3">
               <div className="rounded-lg border border-[#FDE68A] bg-[#FFFBEB] px-3 py-2 text-[12px] leading-relaxed text-[#92400E]">
-                当前系统会在一轮回复达到 20 次工具调用后停止继续调用工具。
+                当前系统会在一轮回复达到 {maxToolLoopRounds} 次 LLM-工具循环后停止继续调用工具。
               </div>
               <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
                 <div className="space-y-3">

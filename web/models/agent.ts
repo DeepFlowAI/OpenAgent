@@ -22,6 +22,7 @@ export type ContextConfig = {
   max_rounds: number
   history_tool_rounds: number
   recent_full_tool_responses: number
+  max_tool_loop_rounds: number
 }
 
 export type PreRecallConfig = {
@@ -105,6 +106,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     max_rounds: 0,
     history_tool_rounds: 0,
     recent_full_tool_responses: 1,
+    max_tool_loop_rounds: 20,
   },
   pre_recall: {
     enabled: false,

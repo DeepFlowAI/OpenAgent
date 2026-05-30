@@ -79,7 +79,7 @@ def _system_tool_data(agent_id: int, tenant_id: str) -> list[dict]:
             "description": (
                 "Request human support when the user explicitly asks for a person, "
                 "the issue requires manual handling, or automated assistance cannot safely continue. "
-                "After recording the request, tell the user it has been logged and do not claim a human joined the chat."
+                "The conversation will pause and wait for the caller to submit the tool result."
             ),
             "is_system": True,
             "is_enabled": False,

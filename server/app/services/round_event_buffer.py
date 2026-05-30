@@ -132,6 +132,14 @@ class _RoundBuffer:
                 return None
             return self._events[-1].raw
 
+    def latest_seq(self) -> int | None:
+        """Most recently buffered seq, or ``None`` if the buffer is empty."""
+        with self._lock:
+            self._last_touched = time.monotonic()
+            if not self._events:
+                return None
+            return self._events[-1].seq
+
     def is_expired(self, now: float) -> bool:
         return now - self._last_touched > TTL_SECONDS
 
@@ -196,6 +204,18 @@ class RoundEventBuffer:
             self.evict(key)
             return None
         return buf.latest_raw()
+
+    def latest_seq(self, key: RoundKey) -> int | None:
+        """Peek at the most recently buffered seq for ``key``."""
+        with self._lock:
+            buf = self._buffers.get(key)
+            if buf is None:
+                return None
+            self._buffers.move_to_end(key)
+        if buf.is_expired(time.monotonic()):
+            self.evict(key)
+            return None
+        return buf.latest_seq()
 
     def evict(self, key: RoundKey) -> None:
         """Remove a round's buffer (e.g. after a successful round end)."""
