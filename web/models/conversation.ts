@@ -24,6 +24,7 @@ export type Conversation = {
   llm_call_count: number
   tool_call_count: number
   total_input_tokens: number
+  total_cached_tokens: number
   total_output_tokens: number
   total_tokens: number
   created_at: string | null
@@ -68,6 +69,7 @@ export type StepTimelineItem = {
   finish_reason: string | null
   request_id: string | null
   input_tokens: number | null
+  cached_tokens: number | null
   output_tokens: number | null
   total_tokens: number | null
   duration_ms: number | null

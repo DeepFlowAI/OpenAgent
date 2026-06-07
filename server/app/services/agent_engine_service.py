@@ -17,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.configs.settings import settings
+from app.db import session as db_session
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.core.trace import (
     get_conversation_external_id,
@@ -216,61 +217,80 @@ async def _hold_round_lock(
     a wedged round can't quietly hang every same-conversation retry. SSE
     routers translate that into ``event: error`` and the SDK surfaces it.
     """
-    conn = await db.connection()
+    # Hold the advisory lock on a DEDICATED connection, not the session's.
+    # ``pg_advisory_lock`` is session-scoped (tied to a physical connection
+    # until explicit unlock or disconnect). The engine calls ``db.commit()``
+    # many times during a round, and each commit returns the session's
+    # connection to the pool — orphaning the lock onto a pooled connection
+    # (advisory locks survive rollback/return-to-pool) and making the unlock
+    # below fail with "This Connection is closed". A connection we own for the
+    # whole round is never recycled mid-flight, so we can always release it.
+    conn = await db_session.engine.connect()
     deadline = time.monotonic() + timeout_sec
     poll_sec = 0.1
     locked_round_number: int | None = None
     waited = False
 
-    while True:
-        round_number, resume = await _resolve_round_state(
-            db, conv, conversation_id, client_message_id,
-        )
-        acquired = (await conn.execute(
-            text("SELECT pg_try_advisory_lock(:k1, :k2)"),
-            {"k1": int(conversation_id), "k2": int(round_number)},
-        )).scalar()
-        if acquired:
-            locked_round_number = round_number
-            if waited:
-                logger.info(
-                    "Round lock acquired after wait — conv=%s round=%s resume=%s",
-                    conversation_id, round_number, resume,
-                )
-            break
-
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            logger.warning(
-                "Round lock wait timed out — conv=%s round=%s after %.1fs",
-                conversation_id, round_number, timeout_sec,
-            )
-            raise ConflictError(
-                f"Conversation {conversation_id} round {round_number} is still "
-                f"busy after {int(timeout_sec)}s; please retry shortly"
-            )
-
-        # Refresh `conv` so the next loop iteration sees a fresh
-        # ``round_count`` (advanced by the in-flight request when its round
-        # commits) and any newly-persisted ``user_message`` for our cmid.
-        await db.refresh(conv)
-        waited = True
-        await asyncio.sleep(min(poll_sec, remaining, 2.0))
-        poll_sec = min(poll_sec * 1.5, 2.0)
-
     try:
-        yield locked_round_number, resume
-    finally:
+        while True:
+            round_number, resume = await _resolve_round_state(
+                db, conv, conversation_id, client_message_id,
+            )
+            acquired = (await conn.execute(
+                text("SELECT pg_try_advisory_lock(:k1, :k2)"),
+                {"k1": int(conversation_id), "k2": int(round_number)},
+            )).scalar()
+            # End the implicit transaction so the connection isn't left
+            # "idle in transaction" for the whole round; the session-level
+            # advisory lock persists across commit.
+            await conn.commit()
+            if acquired:
+                locked_round_number = round_number
+                if waited:
+                    logger.info(
+                        "Round lock acquired after wait — conv=%s round=%s resume=%s",
+                        conversation_id, round_number, resume,
+                    )
+                break
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning(
+                    "Round lock wait timed out — conv=%s round=%s after %.1fs",
+                    conversation_id, round_number, timeout_sec,
+                )
+                raise ConflictError(
+                    f"Conversation {conversation_id} round {round_number} is still "
+                    f"busy after {int(timeout_sec)}s; please retry shortly"
+                )
+
+            # Refresh `conv` so the next loop iteration sees a fresh
+            # ``round_count`` (advanced by the in-flight request when its round
+            # commits) and any newly-persisted ``user_message`` for our cmid.
+            await db.refresh(conv)
+            waited = True
+            await asyncio.sleep(min(poll_sec, remaining, 2.0))
+            poll_sec = min(poll_sec * 1.5, 2.0)
+
         try:
-            await conn.execute(
-                text("SELECT pg_advisory_unlock(:k1, :k2)"),
-                {"k1": int(conversation_id), "k2": int(locked_round_number)},
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "Failed to release round advisory lock conv=%s round=%s: %s",
-                conversation_id, locked_round_number, exc,
-            )
+            yield locked_round_number, resume
+        finally:
+            try:
+                await conn.execute(
+                    text("SELECT pg_advisory_unlock(:k1, :k2)"),
+                    {"k1": int(conversation_id), "k2": int(locked_round_number)},
+                )
+                await conn.commit()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to release round advisory lock conv=%s round=%s: %s",
+                    conversation_id, locked_round_number, exc,
+                )
+                # Force a physical close so PostgreSQL drops the lock instead
+                # of letting it leak back into the pool.
+                await conn.invalidate()
+    finally:
+        await conn.close()
 
 
 @asynccontextmanager
@@ -282,51 +302,59 @@ async def _hold_specific_round_lock(
     timeout_sec: float = ROUND_LOCK_WAIT_TIMEOUT_SEC,
 ) -> AsyncIterator[None]:
     """Acquire one fixed round lock with the same wait policy as chat rounds."""
-    conn = await db.connection()
+    # Dedicated connection — see ``_hold_round_lock`` for why the session's
+    # own connection cannot safely hold a session-level advisory lock.
+    conn = await db_session.engine.connect()
     deadline = time.monotonic() + timeout_sec
     poll_sec = 0.1
     locked = False
 
-    while True:
-        acquired = (await conn.execute(
-            text("SELECT pg_try_advisory_lock(:k1, :k2)"),
-            {"k1": int(conversation_id), "k2": int(round_number)},
-        )).scalar()
-        if acquired:
-            locked = True
-            break
-
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            logger.warning(
-                "Specific round lock wait timed out — conv=%s round=%s after %.1fs",
-                conversation_id,
-                round_number,
-                timeout_sec,
-            )
-            raise ConflictError(
-                f"Conversation {conversation_id} round {round_number} is still "
-                f"busy after {int(timeout_sec)}s; please retry shortly"
-            )
-        await asyncio.sleep(min(poll_sec, remaining, 2.0))
-        poll_sec = min(poll_sec * 1.5, 2.0)
-
     try:
-        yield
-    finally:
-        if locked:
-            try:
-                await conn.execute(
-                    text("SELECT pg_advisory_unlock(:k1, :k2)"),
-                    {"k1": int(conversation_id), "k2": int(round_number)},
-                )
-            except Exception as exc:  # noqa: BLE001
+        while True:
+            acquired = (await conn.execute(
+                text("SELECT pg_try_advisory_lock(:k1, :k2)"),
+                {"k1": int(conversation_id), "k2": int(round_number)},
+            )).scalar()
+            await conn.commit()
+            if acquired:
+                locked = True
+                break
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 logger.warning(
-                    "Failed to release specific round lock conv=%s round=%s: %s",
+                    "Specific round lock wait timed out — conv=%s round=%s after %.1fs",
                     conversation_id,
                     round_number,
-                    exc,
+                    timeout_sec,
                 )
+                raise ConflictError(
+                    f"Conversation {conversation_id} round {round_number} is still "
+                    f"busy after {int(timeout_sec)}s; please retry shortly"
+                )
+            await asyncio.sleep(min(poll_sec, remaining, 2.0))
+            poll_sec = min(poll_sec * 1.5, 2.0)
+
+        try:
+            yield
+        finally:
+            if locked:
+                try:
+                    await conn.execute(
+                        text("SELECT pg_advisory_unlock(:k1, :k2)"),
+                        {"k1": int(conversation_id), "k2": int(round_number)},
+                    )
+                    await conn.commit()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Failed to release specific round lock conv=%s round=%s: %s",
+                        conversation_id,
+                        round_number,
+                        exc,
+                    )
+                    await conn.invalidate()
+    finally:
+        await conn.close()
 
 
 def decide_stream_retry_action(
@@ -1485,10 +1513,11 @@ class AgentEngineService:
                 _total_input_tokens += stream_result.input_tokens or 0
                 _total_output_tokens += stream_result.output_tokens or 0
                 logger.info(
-                    "LLM response — duration=%dms, tokens(in=%s/out=%s/total=%s), "
+                    "LLM response — duration=%dms, tokens(in=%s/cached=%s/out=%s/total=%s), "
                     "finish=%s, tool_calls=%d, deltas=%d",
                     duration_ms,
                     stream_result.input_tokens,
+                    stream_result.cached_tokens,
                     stream_result.output_tokens,
                     stream_result.total_tokens,
                     stream_result.finish_reason,
@@ -1535,6 +1564,7 @@ class AgentEngineService:
                     "finish_reason": stream_result.finish_reason,
                     "request_id": stream_result.request_id,
                     "input_tokens": stream_result.input_tokens,
+                    "cached_tokens": stream_result.cached_tokens,
                     "output_tokens": stream_result.output_tokens,
                     "total_tokens": stream_result.total_tokens,
                     "duration_ms": duration_ms,
@@ -1548,6 +1578,7 @@ class AgentEngineService:
                     db, conversation_id,
                     llm_call_count=1,
                     input_tokens=stream_result.input_tokens,
+                    cached_tokens=stream_result.cached_tokens,
                     output_tokens=stream_result.output_tokens,
                     total_tokens=stream_result.total_tokens,
                 )
@@ -1786,6 +1817,17 @@ class AgentEngineService:
                     await ConversationRepository.increment_counters(
                         db, conversation_id, round_count=1,
                     )
+
+                    # After the first round produces an assistant
+                    # reply, asynchronously generate a one-line summary title.
+                    # Fire-and-forget — never blocks the SSE stream.
+                    if round_number == 1:
+                        from app.services.conversation_title_service import (
+                            schedule_title_summary,
+                        )
+                        schedule_title_summary(
+                            conversation_id, user_message, stream_result.content,
+                        )
 
                     _engine_total_ms = _now_ms() - _engine_start_ms
                     logger.info(
@@ -2502,6 +2544,7 @@ async def _persist_incomplete_llm_step(
         "finish_reason": stream_result.finish_reason,
         "request_id": stream_result.request_id,
         "input_tokens": stream_result.input_tokens or None,
+        "cached_tokens": stream_result.cached_tokens or None,
         "output_tokens": stream_result.output_tokens or None,
         "total_tokens": stream_result.total_tokens or None,
         "duration_ms": duration_ms,
@@ -3212,6 +3255,7 @@ async def _continue_after_failed_tool_result(
         "finish_reason": stream_result.finish_reason,
         "request_id": stream_result.request_id,
         "input_tokens": stream_result.input_tokens,
+        "cached_tokens": stream_result.cached_tokens,
         "output_tokens": stream_result.output_tokens,
         "total_tokens": stream_result.total_tokens,
         "duration_ms": duration_ms,
@@ -3227,6 +3271,7 @@ async def _continue_after_failed_tool_result(
         conversation_id,
         llm_call_count=1,
         input_tokens=stream_result.input_tokens,
+        cached_tokens=stream_result.cached_tokens,
         output_tokens=stream_result.output_tokens,
         total_tokens=stream_result.total_tokens,
     )

@@ -30,6 +30,7 @@ class StepTimelineItem(BaseModel):
     finish_reason: str | None = None
     request_id: str | None = None
     input_tokens: int | None = None
+    cached_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
     duration_ms: int | None = None
@@ -112,6 +113,7 @@ class StepDetailResponse(BaseModel):
     finish_reason: str | None = None
     request_id: str | None = None
     input_tokens: int | None = None
+    cached_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
     duration_ms: int | None = None
@@ -168,6 +170,7 @@ class StepCreate(BaseModel):
     finish_reason: str | None = None
     request_id: str | None = None
     input_tokens: int | None = None
+    cached_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
     duration_ms: int | None = None
@@ -204,6 +207,7 @@ class StepUpdate(BaseModel):
     finish_reason: str | None = None
     request_id: str | None = None
     input_tokens: int | None = None
+    cached_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
     duration_ms: int | None = None

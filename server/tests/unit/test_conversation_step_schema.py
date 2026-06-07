@@ -25,15 +25,17 @@ def _step(**overrides):
 
 
 def test_step_detail_response_reads_orm_metadata_alias():
-    detail = StepDetailResponse.model_validate(_step())
+    detail = StepDetailResponse.model_validate(_step(cached_tokens=12))
 
     assert detail.metadata == {"stream_retry_count": 1}
+    assert detail.cached_tokens == 12
 
 
 def test_timeline_item_reads_orm_metadata_alias():
-    item = StepTimelineItem.model_validate(_step())
+    item = StepTimelineItem.model_validate(_step(cached_tokens=12))
 
     assert item.metadata == {"stream_retry_count": 1}
+    assert item.cached_tokens == 12
 
 
 @pytest.mark.asyncio

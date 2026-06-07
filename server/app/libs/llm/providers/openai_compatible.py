@@ -9,7 +9,14 @@ from typing import AsyncIterator
 import httpx
 
 from app.configs.settings import settings
-from app.libs.llm.base import BaseLLMClient, LLMAPIError, LLMResponse, LLMStreamDelta, LLMStreamResult
+from app.libs.llm.base import (
+    BaseLLMClient,
+    LLMAPIError,
+    LLMResponse,
+    LLMStreamDelta,
+    LLMStreamResult,
+    extract_cached_tokens_from_usage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +151,7 @@ class OpenAICompatibleClient(BaseLLMClient):
             tool_calls=msg.get("tool_calls"),
             finish_reason=choice.get("finish_reason"),
             input_tokens=usage.get("prompt_tokens", 0),
+            cached_tokens=extract_cached_tokens_from_usage(usage),
             output_tokens=usage.get("completion_tokens", 0),
             total_tokens=usage.get("total_tokens", 0),
             request_id=data.get("id"),
@@ -201,6 +209,7 @@ class OpenAICompatibleClient(BaseLLMClient):
                         usage = chunk.get("usage")
                         if usage:
                             result.input_tokens = usage.get("prompt_tokens", 0)
+                            result.cached_tokens = extract_cached_tokens_from_usage(usage)
                             result.output_tokens = usage.get("completion_tokens", 0)
                             result.total_tokens = usage.get("total_tokens", 0)
 

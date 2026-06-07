@@ -131,6 +131,8 @@ class ConversationStepService:
             counter_updates["llm_call_count"] = 1
             if data.input_tokens:
                 counter_updates["input_tokens"] = data.input_tokens
+            if data.cached_tokens:
+                counter_updates["cached_tokens"] = data.cached_tokens
             if data.output_tokens:
                 counter_updates["output_tokens"] = data.output_tokens
             if data.total_tokens:
@@ -174,6 +176,8 @@ class ConversationStepService:
             token_updates = {}
             if data.input_tokens is not None:
                 token_updates["input_tokens"] = data.input_tokens
+            if data.cached_tokens is not None:
+                token_updates["cached_tokens"] = data.cached_tokens
             if data.output_tokens is not None:
                 token_updates["output_tokens"] = data.output_tokens
             if data.total_tokens is not None:

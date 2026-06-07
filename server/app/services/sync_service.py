@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.configs.settings import settings
 from app.core.exceptions import ConflictError, NotFoundError
+from app.db import session as db_session
 from app.libs.git_sync.provider import GitSyncService
 from app.libs.doc_parser.parser import (
     parse_document,
@@ -231,18 +232,25 @@ async def _probe_kb_sync_lock(db: AsyncSession, kb_id: int) -> bool:
 
 
 async def _clear_orphaned_kb_sync_lock(db: AsyncSession, kb_id: int) -> int:
-    """Terminate idle backends still holding this KB's sync lock (pool leak recovery)."""
+    """Terminate stale backends still holding this KB's sync lock.
+
+    A real sync must have a ``running`` sync log. Callers only reach this helper
+    after that source of truth says no job is running, so an old lock holder is
+    treated as orphaned even if PostgreSQL reports it as non-idle.
+    """
     result = await db.execute(
         text("""
             SELECT l.pid
             FROM pg_locks l
             JOIN pg_stat_activity a ON a.pid = l.pid
             WHERE l.locktype = 'advisory'
+              AND l.database = (
+                  SELECT oid FROM pg_database WHERE datname = current_database()
+              )
               AND l.classid = :k1
               AND l.objid = :k2
               AND a.pid <> pg_backend_pid()
-              AND a.state = 'idle'
-              AND now() - COALESCE(a.state_change, a.backend_start)
+              AND now() - COALESCE(a.state_change, a.xact_start, a.backend_start)
                   > interval '2 minutes'
         """),
         _kb_sync_lock_keys(kb_id),
@@ -267,45 +275,96 @@ async def _ensure_kb_sync_available(db: AsyncSession, kb_id: int) -> None:
         return
     if await SyncLogRepository.has_running(db, kb_id):
         raise ConflictError("Knowledge base sync is already in progress")
-    await _clear_orphaned_kb_sync_lock(db, kb_id)
-    if not await _probe_kb_sync_lock(db, kb_id):
-        raise ConflictError("Knowledge base sync is already in progress")
+    cleared = await _clear_orphaned_kb_sync_lock(db, kb_id)
+    retry_count = 5 if cleared else 1
+    for attempt in range(retry_count):
+        if await _probe_kb_sync_lock(db, kb_id):
+            return
+        if attempt < retry_count - 1:
+            await asyncio.sleep(0.2)
+    raise ConflictError("Knowledge base sync is already in progress")
+
+
+async def _release_lock_on_conn(conn, kb_id: int) -> None:
+    """Release the sync advisory lock on its dedicated connection.
+
+    With a dedicated connection (never recycled by the session's commits) the
+    unlock reliably succeeds. If it somehow fails we invalidate the connection
+    so PostgreSQL physically drops it — and the lock with it — instead of
+    returning it to the pool with the lock still held.
+    """
+    try:
+        await conn.execute(
+            text("SELECT pg_advisory_unlock(:k1, :k2)"),
+            _kb_sync_lock_keys(kb_id),
+        )
+        await conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Failed to release KB sync advisory lock kb_id=%s: %s; "
+            "invalidating connection",
+            kb_id, exc,
+        )
+        try:
+            await conn.invalidate()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @asynccontextmanager
 async def _kb_sync_lock(db: AsyncSession, kb_id: int):
-    """One active sync per knowledge base; 409 if another job holds the lock."""
-    conn = await db.connection()
-    acquired = bool((await conn.execute(
-        text("SELECT pg_try_advisory_lock(:k1, :k2)"),
-        _kb_sync_lock_keys(kb_id),
-    )).scalar())
-    if not acquired:
-        raise ConflictError("Knowledge base sync is already in progress")
+    """One active sync per knowledge base; 409 if another job holds the lock.
+
+    The advisory lock is held on a DEDICATED connection, not the session's: a
+    sync commits many times, and each commit returns the session's connection
+    to the pool, which would orphan this session-level advisory lock onto a
+    pooled connection (it survives rollback/return-to-pool) and leak it. A
+    connection we own for the whole job is never recycled, so we always release.
+    """
+    conn = await db_session.engine.connect()
     try:
-        yield
+        acquired = bool((await conn.execute(
+            text("SELECT pg_try_advisory_lock(:k1, :k2)"),
+            _kb_sync_lock_keys(kb_id),
+        )).scalar())
+        await conn.commit()
+        if not acquired:
+            raise ConflictError("Knowledge base sync is already in progress")
+        try:
+            yield
+        finally:
+            await _release_lock_on_conn(conn, kb_id)
     finally:
-        await _release_kb_sync_lock(conn, kb_id)
+        await conn.close()
 
 
 @asynccontextmanager
 async def _kb_sync_lock_with_recovery(
     db: AsyncSession, kb_id: int, sync_log_id: int,
 ):
-    """Acquire KB sync lock; on acquire failure clear pool orphans and retry once."""
+    """Acquire KB sync lock; on acquire failure clear pool orphans and retry once.
+
+    Like :func:`_kb_sync_lock`, the lock is held on a dedicated connection so it
+    can never leak into the pool.
+    """
     last_exc = ConflictError("Knowledge base sync is already in progress")
     for attempt in range(2):
-        conn = await db.connection()
-        acquired = bool((await conn.execute(
-            text("SELECT pg_try_advisory_lock(:k1, :k2)"),
-            _kb_sync_lock_keys(kb_id),
-        )).scalar())
-        if acquired:
-            try:
-                yield
-            finally:
-                await _release_kb_sync_lock(conn, kb_id)
-            return
+        conn = await db_session.engine.connect()
+        acquired = False
+        try:
+            acquired = bool((await conn.execute(
+                text("SELECT pg_try_advisory_lock(:k1, :k2)"),
+                _kb_sync_lock_keys(kb_id),
+            )).scalar())
+            await conn.commit()
+            if acquired:
+                try:
+                    yield
+                finally:
+                    await _release_lock_on_conn(conn, kb_id)
+                return
+        finally:
+            await conn.close()
         if attempt == 0:
             running = await SyncLogRepository.get_latest_running(db, kb_id)
             if running is not None and running.id != sync_log_id:

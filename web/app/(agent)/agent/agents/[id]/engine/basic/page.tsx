@@ -321,7 +321,7 @@ export default function BasicSettingsPage() {
             value={config.system_prompt}
             onChange={(e) => setConfig((prev) => ({ ...prev, system_prompt: e.target.value }))}
             placeholder="你是一个AI助手，请帮助用户..."
-            maxLength={10000}
+            maxLength={30000}
             rows={12}
             className="w-full resize-y rounded-lg border border-[#E4E4E7] p-4 font-mono text-sm text-[#18181B] outline-none placeholder:text-[#A1A1AA] focus:border-[#18181B]"
           />

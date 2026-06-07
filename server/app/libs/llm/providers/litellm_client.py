@@ -16,6 +16,7 @@ Reliability (aligned with AgentEngine: SSE streaming, tool loop, single user-sel
   no further retry should happen.
 """
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -30,6 +31,7 @@ from app.libs.llm.base import (
     LLMResponse,
     LLMStreamDelta,
     LLMStreamResult,
+    extract_cached_tokens_from_usage,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,9 +70,12 @@ PROVIDER_BASE_URLS: dict[str, str] = _provider_base_urls()
 # Bailian (DashScope compatible-mode) model ids — short UI name -> upstream id.
 # Upstream examples: kimi/kimi-k2.6, ZHIPU/GLM-5.1, MiniMax/MiniMax-M2.7
 BAILIAN_MODEL_MAP: dict[str, str] = {
+    "deepseek-v4-pro": "openai/deepseek-v4-pro",
     "kimi-k2.6": "openai/kimi/kimi-k2.6",
     "glm-5.1": "openai/ZHIPU/GLM-5.1",
     "minimax-m2.7": "openai/MiniMax/MiniMax-M2.7",
+    # Cheap/fast model used for conversation title summarization.
+    "qwen3.6-flash": "openai/qwen3.6-flash",
 }
 
 OFFICIAL_MODEL_MAP: dict[str, dict] = {
@@ -132,6 +137,24 @@ INCOMPLETE_MISSING_FINISH = "missing_finish_reason"
 INCOMPLETE_HARD_TIMEOUT = "hard_timeout"  # only used in the LLMAPIError message
 
 litellm.drop_params = True
+# LiteLLM's aiohttp transport has produced leaked ClientSession warnings in
+# production. Use its httpx transport instead; our direct HTTP integrations
+# already use httpx with scoped clients.
+litellm.disable_aiohttp_transport = True
+
+
+async def _close_litellm_stream(obj: object) -> None:
+    close = getattr(obj, "aclose", None)
+    if callable(close):
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+        return
+    close = getattr(obj, "close", None)
+    if callable(close):
+        result = close()
+        if inspect.isawaitable(result):
+            await result
 
 
 def _merge_extra_body(kwargs: dict, patch: dict) -> None:
@@ -277,9 +300,19 @@ def _resolve_model(model: str) -> str:
     return OPENROUTER_MODEL_MAP.get(model, model)
 
 
-def _messages_for_channel(messages: list[dict], channel: str) -> list[dict]:
-    """Return request messages adjusted for provider-specific extensions."""
+def _preserve_reasoning_content(channel: str, resolved_model: str) -> bool:
+    """Whether historical assistant reasoning should be replayed upstream."""
     if channel == "deepseek-official":
+        return True
+    if channel == "aliyun-bailian" and resolved_model == "openai/deepseek-v4-pro":
+        return True
+    m = resolved_model.lower()
+    return "kimi" in m or "moonshot" in m
+
+
+def _messages_for_channel(messages: list[dict], channel: str, resolved_model: str) -> list[dict]:
+    """Return request messages adjusted for provider-specific extensions."""
+    if _preserve_reasoning_content(channel, resolved_model):
         return messages
 
     changed = False
@@ -427,6 +460,16 @@ def _apply_thinking(kwargs: dict, thinking_enabled: bool, resolved_model: str, c
         )
         if thinking_enabled:
             kwargs["reasoning_effort"] = "high"
+    elif channel == "aliyun-bailian" and resolved_model == "openai/deepseek-v4-pro":
+        _merge_extra_body(kwargs, {"enable_thinking": thinking_enabled})
+        if thinking_enabled:
+            kwargs["reasoning_effort"] = "high"
+    elif channel == "aliyun-bailian" and "qwen" in resolved_model.lower():
+        # Qwen3 models on DashScope default to thinking ON, which burns ~1k
+        # reasoning tokens even for a few-char output (e.g. the conversation
+        # title summary). Honor the caller's flag explicitly so thinking-off
+        # paths actually disable it.
+        _merge_extra_body(kwargs, {"enable_thinking": thinking_enabled})
     elif channel == "minimax-official" and thinking_enabled:
         _merge_extra_body(kwargs, {"reasoning_split": True})
 
@@ -443,7 +486,7 @@ def _request_kwargs(
     """Build common LiteLLM request kwargs for one provider candidate."""
     kwargs: dict = {
         "model": candidate["model"],
-        "messages": _messages_for_channel(messages, candidate["channel"]),
+        "messages": _messages_for_channel(messages, candidate["channel"], candidate["model"]),
         "temperature": candidate.get("temperature", temperature),
         "top_p": top_p,
         "max_tokens": max_tokens,
@@ -544,6 +587,7 @@ class LiteLLMClient(BaseLLMClient):
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason,
             input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+            cached_tokens=extract_cached_tokens_from_usage(usage),
             output_tokens=getattr(usage, "completion_tokens", 0) or 0,
             total_tokens=getattr(usage, "total_tokens", 0) or 0,
             request_id=response.id,
@@ -553,9 +597,9 @@ class LiteLLMClient(BaseLLMClient):
         )
 
         logger.info(
-            "LLM response (sync) — model=%s, finish=%s, tokens(in=%s/out=%s/total=%s)",
+            "LLM response (sync) — model=%s, finish=%s, tokens(in=%s/cached=%s/out=%s/total=%s)",
             result.model, result.finish_reason,
-            result.input_tokens, result.output_tokens, result.total_tokens,
+            result.input_tokens, result.cached_tokens, result.output_tokens, result.total_tokens,
         )
         return result
 
@@ -650,137 +694,143 @@ class LiteLLMClient(BaseLLMClient):
             has_first_chunk = False
             chunk_iter = response.__aiter__()
 
-            while True:
-                # Hard wall-clock check — never retry past this point.
-                elapsed = time.monotonic() - stream_started_at
-                if elapsed > hard_timeout:
-                    logger.warning(
-                        "LLM stream hard timeout — model=%s, elapsed=%.1fs > limit=%.1fs",
-                        result.model or model, elapsed, hard_timeout,
-                    )
-                    raise LLMAPIError(
-                        status_code=504,
-                        message=f"LLM stream hard timeout after {elapsed:.1f}s",
-                        error_type=INCOMPLETE_HARD_TIMEOUT,
-                    )
-
-                # Choose per-step timeout: first-chunk vs idle gap.
-                # Cap by remaining hard-timeout budget so a slow first chunk can't
-                # silently push us past the wall-clock limit.
-                step_timeout = first_chunk_timeout if not has_first_chunk else idle_timeout
-                step_timeout = min(step_timeout, max(hard_timeout - elapsed, 0.1))
-
-                try:
-                    chunk = await asyncio.wait_for(
-                        chunk_iter.__anext__(), timeout=step_timeout
-                    )
-                except StopAsyncIteration:
-                    # Natural end-of-stream — break and validate finish_reason below.
-                    break
-                except asyncio.TimeoutError:
-                    reason = (
-                        INCOMPLETE_FIRST_CHUNK_TIMEOUT
-                        if not has_first_chunk
-                        else INCOMPLETE_IDLE_TIMEOUT
-                    )
-                    logger.warning(
-                        "LLM stream incomplete — reason=%s, model=%s, partial_chars=%d, "
-                        "thinking_chars=%d, elapsed=%.1fs, step_timeout=%.1fs",
-                        reason, result.model or model, len(result.content),
-                        len(result.thinking_content), elapsed, step_timeout,
-                    )
-                    result.incomplete_reason = reason
-                    return
-                except (asyncio.CancelledError, GeneratorExit):
-                    # Client disconnect / engine cancellation — propagate verbatim
-                    # so engine retry logic sees CancelledError and bails out.
-                    raise
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "LLM stream error mid-stream — reason=%s, model=%s, exc=%s",
-                        INCOMPLETE_STREAM_ERROR, result.model or model, exc,
-                    )
-                    result.incomplete_reason = INCOMPLETE_STREAM_ERROR
-                    return
-
-                has_first_chunk = True
-
-                if chunk.id:
-                    result.request_id = chunk.id
-                if chunk.model:
-                    result.model = chunk.model
-
-                usage = getattr(chunk, "usage", None)
-                if usage:
-                    result.input_tokens = getattr(usage, "prompt_tokens", 0) or 0
-                    result.output_tokens = getattr(usage, "completion_tokens", 0) or 0
-                    result.total_tokens = getattr(usage, "total_tokens", 0) or 0
-
-                choices = chunk.choices
-                if not choices:
-                    continue
-
-                choice = choices[0]
-                delta = choice.delta
-                finish_reason = choice.finish_reason
-
-                content = _strip_leading_orphan_think_close(getattr(delta, "content", None))
-                # Drop reasoning locally when thinking is disabled — avoids
-                # passing OpenRouter reasoning suppression flags that are
-                # interpreted inconsistently and can break tool_calls.
-                thinking = _delta_thinking_text(delta) if thinking_enabled else None
-                raw_tool_calls = getattr(delta, "tool_calls", None)
-
-                if content:
-                    result.content += content
-                if thinking:
-                    result.thinking_content += thinking
-                if finish_reason:
-                    result.finish_reason = finish_reason
-
-                tool_calls_dicts = None
-                if raw_tool_calls:
-                    tool_calls_dicts = []
-                    for tc in raw_tool_calls:
-                        idx = getattr(tc, "index", 0) or 0
-                        while len(result.tool_calls) <= idx:
-                            result.tool_calls.append(
-                                {
-                                    "id": "",
-                                    "type": "function",
-                                    "function": {"name": "", "arguments": ""},
-                                }
-                            )
-                        existing = result.tool_calls[idx]
-                        tc_id = getattr(tc, "id", None)
-                        if tc_id:
-                            existing["id"] = tc_id
-                        fn = getattr(tc, "function", None)
-                        if fn:
-                            name = getattr(fn, "name", None)
-                            args = getattr(fn, "arguments", None)
-                            if name:
-                                existing["function"]["name"] += name
-                            if args:
-                                existing["function"]["arguments"] += args
-
-                        tool_calls_dicts.append(
-                            {
-                                "index": idx,
-                                "id": tc_id or "",
-                                "function": {
-                                    "name": getattr(fn, "name", "") or "",
-                                    "arguments": getattr(fn, "arguments", "") or "",
-                                },
-                            }
+            try:
+                while True:
+                    # Hard wall-clock check — never retry past this point.
+                    elapsed = time.monotonic() - stream_started_at
+                    if elapsed > hard_timeout:
+                        logger.warning(
+                            "LLM stream hard timeout — model=%s, elapsed=%.1fs > limit=%.1fs",
+                            result.model or model, elapsed, hard_timeout,
+                        )
+                        raise LLMAPIError(
+                            status_code=504,
+                            message=f"LLM stream hard timeout after {elapsed:.1f}s",
+                            error_type=INCOMPLETE_HARD_TIMEOUT,
                         )
 
-                yield LLMStreamDelta(
-                    content=content,
-                    thinking_content=thinking,
-                    tool_calls=tool_calls_dicts,
-                    finish_reason=finish_reason,
-                )
+                    # Choose per-step timeout: first-chunk vs idle gap.
+                    # Cap by remaining hard-timeout budget so a slow first chunk can't
+                    # silently push us past the wall-clock limit.
+                    step_timeout = first_chunk_timeout if not has_first_chunk else idle_timeout
+                    step_timeout = min(step_timeout, max(hard_timeout - elapsed, 0.1))
+
+                    try:
+                        chunk = await asyncio.wait_for(
+                            chunk_iter.__anext__(), timeout=step_timeout
+                        )
+                    except StopAsyncIteration:
+                        # Natural end-of-stream — break and validate finish_reason below.
+                        break
+                    except asyncio.TimeoutError:
+                        reason = (
+                            INCOMPLETE_FIRST_CHUNK_TIMEOUT
+                            if not has_first_chunk
+                            else INCOMPLETE_IDLE_TIMEOUT
+                        )
+                        logger.warning(
+                            "LLM stream incomplete — reason=%s, model=%s, partial_chars=%d, "
+                            "thinking_chars=%d, elapsed=%.1fs, step_timeout=%.1fs",
+                            reason, result.model or model, len(result.content),
+                            len(result.thinking_content), elapsed, step_timeout,
+                        )
+                        result.incomplete_reason = reason
+                        return
+                    except (asyncio.CancelledError, GeneratorExit):
+                        # Client disconnect / engine cancellation — propagate verbatim
+                        # so engine retry logic sees CancelledError and bails out.
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "LLM stream error mid-stream — reason=%s, model=%s, exc=%s",
+                            INCOMPLETE_STREAM_ERROR, result.model or model, exc,
+                        )
+                        result.incomplete_reason = INCOMPLETE_STREAM_ERROR
+                        return
+
+                    has_first_chunk = True
+
+                    if chunk.id:
+                        result.request_id = chunk.id
+                    if chunk.model:
+                        result.model = chunk.model
+
+                    usage = getattr(chunk, "usage", None)
+                    if usage:
+                        result.input_tokens = getattr(usage, "prompt_tokens", 0) or 0
+                        result.cached_tokens = extract_cached_tokens_from_usage(usage)
+                        result.output_tokens = getattr(usage, "completion_tokens", 0) or 0
+                        result.total_tokens = getattr(usage, "total_tokens", 0) or 0
+
+                    choices = chunk.choices
+                    if not choices:
+                        continue
+
+                    choice = choices[0]
+                    delta = choice.delta
+                    finish_reason = choice.finish_reason
+
+                    content = _strip_leading_orphan_think_close(getattr(delta, "content", None))
+                    # Drop reasoning locally when thinking is disabled — avoids
+                    # passing OpenRouter reasoning suppression flags that are
+                    # interpreted inconsistently and can break tool_calls.
+                    thinking = _delta_thinking_text(delta) if thinking_enabled else None
+                    raw_tool_calls = getattr(delta, "tool_calls", None)
+
+                    if content:
+                        result.content += content
+                    if thinking:
+                        result.thinking_content += thinking
+                    if finish_reason:
+                        result.finish_reason = finish_reason
+
+                    tool_calls_dicts = None
+                    if raw_tool_calls:
+                        tool_calls_dicts = []
+                        for tc in raw_tool_calls:
+                            idx = getattr(tc, "index", 0) or 0
+                            while len(result.tool_calls) <= idx:
+                                result.tool_calls.append(
+                                    {
+                                        "id": "",
+                                        "type": "function",
+                                        "function": {"name": "", "arguments": ""},
+                                    }
+                                )
+                            existing = result.tool_calls[idx]
+                            tc_id = getattr(tc, "id", None)
+                            if tc_id:
+                                existing["id"] = tc_id
+                            fn = getattr(tc, "function", None)
+                            if fn:
+                                name = getattr(fn, "name", None)
+                                args = getattr(fn, "arguments", None)
+                                if name:
+                                    existing["function"]["name"] += name
+                                if args:
+                                    existing["function"]["arguments"] += args
+
+                            tool_calls_dicts.append(
+                                {
+                                    "index": idx,
+                                    "id": tc_id or "",
+                                    "function": {
+                                        "name": getattr(fn, "name", "") or "",
+                                        "arguments": getattr(fn, "arguments", "") or "",
+                                    },
+                                }
+                            )
+
+                    yield LLMStreamDelta(
+                        content=content,
+                        thinking_content=thinking,
+                        tool_calls=tool_calls_dicts,
+                        finish_reason=finish_reason,
+                    )
+            finally:
+                await _close_litellm_stream(chunk_iter)
+                if chunk_iter is not response:
+                    await _close_litellm_stream(response)
 
             # ── Stream finished naturally — validate finish_reason ──
             # `length` counts as "valid" here (engine-level continuation is out of

@@ -25,9 +25,7 @@ import {
   type AppendMessage,
 } from '@assistant-ui/react'
 import {
-  ThinkingBlockUI,
-  ToolBlockUI,
-  InlineContentUI,
+  IntermediateSteps,
   MarkdownContent,
   StreamingMarkdownContent,
   StreamingThinkingPlaceholder,
@@ -168,6 +166,34 @@ function cloneMessages(messages: ChatMessage[]): ChatMessage[] {
   return messages.map(cloneMessage)
 }
 
+// Guards against messages persisted by older builds (or partially-shaped JSON)
+// that predate the thinking/content/tool block model. Without this, the block
+// `.map` calls in cloneMessage and the render path throw and take down the
+// whole chat. Legacy assistant messages only carried `content`, so synthesize a
+// single content block to keep their reply visible. Loaded history is never
+// live, so force isStreaming off to avoid a stuck "thinking" state.
+function normalizeChatMessage(message: ChatMessage): ChatMessage {
+  const thinkingBlocks = Array.isArray(message.thinkingBlocks) ? message.thinkingBlocks : []
+  const toolBlocks = Array.isArray(message.toolBlocks) ? message.toolBlocks : []
+  let contentBlocks = Array.isArray(message.contentBlocks) ? message.contentBlocks : []
+  if (contentBlocks.length === 0 && message.role === 'assistant' && message.content) {
+    contentBlocks = [{
+      id: `${message.id}_legacy_content`,
+      content: message.content,
+      llmStepId: null,
+      isStreaming: false,
+      timelineIndex: 0,
+    }]
+  }
+  return {
+    ...message,
+    isStreaming: false,
+    thinkingBlocks,
+    contentBlocks,
+    toolBlocks,
+  }
+}
+
 function isPendingTurn(status: StreamTurnStatus) {
   return status === 'active' || status === 'detached' || status === 'resuming'
 }
@@ -249,7 +275,12 @@ function loadConversations(channelId: number): StoredConv[] {
       }
     }
     if (!raw) return []
-    return JSON.parse(raw) as StoredConv[]
+    const parsed = JSON.parse(raw) as StoredConv[]
+    if (!Array.isArray(parsed)) return []
+    return parsed.map(conv => ({
+      ...conv,
+      messages: Array.isArray(conv.messages) ? conv.messages.map(normalizeChatMessage) : [],
+    }))
   } catch {
     return []
   }
@@ -765,6 +796,10 @@ export default function ChatPage() {
   const isStreamingRef = useRef(false)
   const turnsByClientMessageIdRef = useRef<Map<string, StreamTurn>>(new Map())
   const turnByConversationIdRef = useRef<Map<number, string>>(new Map())
+  // Conversations created this session whose first round is pending a summary
+  // title; on first-round done we schedule one delayed refresh to pick it up.
+  const firstRoundConvIdsRef = useRef<Set<number>>(new Set())
+  const summaryRefreshTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set())
 
   const appearance = useMemo<AppearanceCfg>(() => {
     const cfg = channel?.config as Record<string, unknown> | undefined
@@ -926,6 +961,14 @@ export default function ChatPage() {
   }, [refreshConversations])
 
   useEffect(() => {
+    const timers = summaryRefreshTimersRef.current
+    return () => {
+      timers.forEach(clearTimeout)
+      timers.clear()
+    }
+  }, [])
+
+  useEffect(() => {
     if (!channelId || storedConvs.length === 0) return
     saveConversations(channelId, storedConvs)
   }, [storedConvs, channelId])
@@ -1039,6 +1082,10 @@ export default function ChatPage() {
         const wasNewConversation = turn.conversationId == null
         turn.conversationId = data.conversation_id
         turnByConversationIdRef.current.set(data.conversation_id, turn.clientMessageId)
+        if (wasNewConversation) {
+          // New conversation → its first round generates a summary title async.
+          firstRoundConvIdsRef.current.add(data.conversation_id)
+        }
 
         const snapshot = cloneMessages(turn.messages)
         setStoredConvs((convs) => {
@@ -1205,6 +1252,18 @@ export default function ChatPage() {
           abortRef.current = null
         }
         setTurnStatus(turn, 'done')
+        // After the first round of a new conversation completes,
+        // the backend asynchronously generates a summary title. Schedule one
+        // delayed refresh so it surfaces in-session without a manual return.
+        const summaryConvId = turn.conversationId
+        if (summaryConvId != null && firstRoundConvIdsRef.current.has(summaryConvId)) {
+          firstRoundConvIdsRef.current.delete(summaryConvId)
+          const timer = setTimeout(() => {
+            summaryRefreshTimersRef.current.delete(timer)
+            void refreshConversations(false)
+          }, 3500)
+          summaryRefreshTimersRef.current.add(timer)
+        }
         updateTurnMessages(turn, prev => prev.map((m) => {
           if (m.id !== turn.assistantMessageId) return m
           const finalContent = data.final_content
@@ -1374,6 +1433,7 @@ export default function ChatPage() {
     bumpTurnStatus,
     channelToken,
     conversationSettings,
+    refreshConversations,
     setActiveConversation,
     setTurnStatus,
     syncTurnToActive,
@@ -2484,29 +2544,13 @@ function ChatAssistantMessage({
             </div>
           )}
 
-        {[
-          ...message.thinkingBlocks.map(b => ({ type: 'thinking' as const, block: b, idx: b.timelineIndex ?? 0 })),
-          ...message.toolBlocks.map(b => ({ type: 'tool' as const, block: b, idx: b.timelineIndex ?? 0 })),
-          ...inlineContentBlocks.map(b => ({ type: 'content' as const, block: b, idx: b.timelineIndex ?? 0 })),
-        ]
-          .sort((a, b) => a.idx - b.idx)
-          .map(entry => {
-            switch (entry.type) {
-              case 'thinking':
-                return <ThinkingBlockUI key={entry.block.id} block={entry.block} />
-              case 'tool':
-                return <ToolBlockUI key={entry.block.id} block={entry.block} />
-              case 'content':
-                return (
-                  <InlineContentUI
-                    key={entry.block.id}
-                    block={entry.block}
-                    samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
-                  />
-                )
-            }
-          })
-        }
+        <IntermediateSteps
+          thinkingBlocks={message.thinkingBlocks}
+          toolBlocks={message.toolBlocks}
+          inlineContentBlocks={inlineContentBlocks}
+          isStreaming={message.isStreaming}
+          samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
+        />
 
         {showReplyBubble && (
           <div

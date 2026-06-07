@@ -61,6 +61,7 @@ class Conversation(Base, TimestampMixin):
     llm_call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     tool_call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_cached_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 

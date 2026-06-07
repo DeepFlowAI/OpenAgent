@@ -126,6 +126,7 @@ def _record_response(span, *, response: LLMResponse) -> None:
     # ever one reason per response in our flow anyway.
     span.set_attribute("gen_ai.response.finish_reasons", response.finish_reason or "")
     span.set_attribute("gen_ai.usage.input_tokens", int(response.input_tokens or 0))
+    span.set_attribute("gen_ai.usage.cached_tokens", int(response.cached_tokens or 0))
     span.set_attribute("gen_ai.usage.output_tokens", int(response.output_tokens or 0))
     span.set_attribute("gen_ai.usage.total_tokens", int(response.total_tokens or 0))
     if response.request_id:
@@ -150,6 +151,7 @@ def _record_stream_result(span, *, result: LLMStreamResult) -> None:
     # silently drop the span. Single-string is enough for current consumers.
     span.set_attribute("gen_ai.response.finish_reasons", result.finish_reason or "")
     span.set_attribute("gen_ai.usage.input_tokens", int(result.input_tokens or 0))
+    span.set_attribute("gen_ai.usage.cached_tokens", int(result.cached_tokens or 0))
     span.set_attribute("gen_ai.usage.output_tokens", int(result.output_tokens or 0))
     span.set_attribute("gen_ai.usage.total_tokens", int(result.total_tokens or 0))
     if result.request_id:

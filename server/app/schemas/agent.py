@@ -117,7 +117,7 @@ class ConversationSettingsConfig(BaseModel):
 
 
 class EngineConfig(BaseModel):
-    system_prompt: str = Field(default="", max_length=10000)
+    system_prompt: str = Field(default="", max_length=30000)
     model: ModelConfig = Field(default_factory=ModelConfig)
     selected_tool_ids: list[int] = Field(default_factory=list)
     context: ContextConfig = Field(default_factory=ContextConfig)
@@ -186,7 +186,7 @@ class EngineConfigUpdate(BaseModel):
 
         return data
 
-    system_prompt: str | None = Field(None, max_length=10000)
+    system_prompt: str | None = Field(None, max_length=30000)
     model: ModelConfig | None = None
     selected_tool_ids: list[int] | None = None
     context: ContextConfig | None = None

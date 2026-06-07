@@ -140,6 +140,16 @@ export function ConversationDrawer({
     return String(n)
   }
 
+  const formatCachedTokens = (
+    cachedTokens: number | null | undefined,
+    inputTokens: number | null | undefined
+  ) => {
+    const percent = !inputTokens || cachedTokens === null || cachedTokens === undefined
+      ? '—'
+      : `${((cachedTokens / inputTokens) * 100).toFixed(1)}%`
+    return `${formatTokens(cachedTokens)} (${percent})`
+  }
+
   const formatFeedbackRating = (rating: StepTimelineItem['feedback_rating']) => {
     if (rating === 'like') return '赞'
     if (rating === 'dislike') return '踩'
@@ -518,6 +528,15 @@ export function ConversationDrawer({
                   <SideInfoRow label="输入 Token">
                     <span className="text-xs text-[#1a1a1a]">
                       {formatTokens(infoSource.total_input_tokens)}
+                    </span>
+                  </SideInfoRow>
+
+                  <SideInfoRow label="缓存命中 Token">
+                    <span className="text-xs text-[#1a1a1a]">
+                      {formatCachedTokens(
+                        infoSource.total_cached_tokens,
+                        infoSource.total_input_tokens
+                      )}
                     </span>
                   </SideInfoRow>
 

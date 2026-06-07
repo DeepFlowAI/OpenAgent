@@ -3,7 +3,7 @@ LLM provider abstraction — abstract interface for large language model calls.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 
 class LLMAPIError(Exception):
@@ -41,6 +41,45 @@ class LLMStreamDelta:
     finish_reason: str | None = None
 
 
+_CACHE_TOKEN_KEYS = (
+    "cached_tokens",
+    "cache_read_input_tokens",
+    "prompt_cache_hit_tokens",
+)
+
+
+def _usage_value(container: Any, key: str) -> Any:
+    if container is None:
+        return None
+    if isinstance(container, dict):
+        return container.get(key)
+    return getattr(container, key, None)
+
+
+def _token_count(value: Any) -> int:
+    if value is None:
+        return 0
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def extract_cached_tokens_from_usage(usage: Any) -> int:
+    """Extract prompt-cache hit tokens from OpenAI-compatible usage payloads."""
+    prompt_details = _usage_value(usage, "prompt_tokens_details")
+    for key in _CACHE_TOKEN_KEYS:
+        count = _token_count(_usage_value(prompt_details, key))
+        if count:
+            return count
+
+    for key in _CACHE_TOKEN_KEYS:
+        count = _token_count(_usage_value(usage, key))
+        if count:
+            return count
+    return 0
+
+
 @dataclass
 class LLMResponse:
     """Complete (non-streaming) LLM response."""
@@ -49,6 +88,7 @@ class LLMResponse:
     tool_calls: list[dict] | None = None
     finish_reason: str | None = None
     input_tokens: int = 0
+    cached_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
     request_id: str | None = None
@@ -76,6 +116,7 @@ class LLMStreamResult:
     tool_calls: list[dict] = field(default_factory=list)
     finish_reason: str | None = None
     input_tokens: int = 0
+    cached_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
     request_id: str | None = None

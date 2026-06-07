@@ -76,6 +76,7 @@ class ConversationResponse(BaseModel):
     llm_call_count: int = 0
     tool_call_count: int = 0
     total_input_tokens: int = 0
+    total_cached_tokens: int = 0
     total_output_tokens: int = 0
     total_tokens: int = 0
     created_at: datetime | None = None

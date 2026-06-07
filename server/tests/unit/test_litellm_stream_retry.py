@@ -84,6 +84,15 @@ class _ScriptedStream:
         return item["chunk"]
 
 
+class _ClosableScriptedStream(_ScriptedStream):
+    def __init__(self, script: list):
+        super().__init__(script)
+        self.closed = False
+
+    async def aclose(self):
+        self.closed = True
+
+
 @pytest.fixture(autouse=True)
 def _stream_test_settings(monkeypatch):
     """Tighten timeouts so tests run in well under a second each.
@@ -111,6 +120,10 @@ async def _run(stream_or_factory):
 
 
 # ── Tests ─────────────────────────────────────────────────────────────
+
+
+def test_litellm_aiohttp_transport_is_disabled():
+    assert litellm_client.litellm.disable_aiohttp_transport is True
 
 
 @pytest.mark.asyncio
@@ -238,6 +251,25 @@ async def test_first_chunk_timeout_sets_reason(monkeypatch):
     assert deltas == []  # no chunks consumed
     assert result.incomplete_reason == litellm_client.INCOMPLETE_FIRST_CHUNK_TIMEOUT
     assert result.content == ""
+
+
+@pytest.mark.asyncio
+async def test_first_chunk_timeout_closes_stream(monkeypatch):
+    upstream = _ClosableScriptedStream([
+        {"chunk": _chunk(content="late", finish_reason="stop"), "delay": 0.2},
+    ])
+    fake_acompletion = await _run(upstream)
+    monkeypatch.setattr(litellm_client.litellm, "acompletion", fake_acompletion)
+
+    stream, result = await litellm_client.LiteLLMClient().stream_chat(
+        [{"role": "user", "content": "hi"}],
+        model="minimax-m2.7",
+    )
+    deltas = [d async for d in stream]
+
+    assert deltas == []
+    assert result.incomplete_reason == litellm_client.INCOMPLETE_FIRST_CHUNK_TIMEOUT
+    assert upstream.closed is True
 
 
 @pytest.mark.asyncio

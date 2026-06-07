@@ -71,3 +71,8 @@ def setup_logging() -> None:
     logging.getLogger("sqlalchemy.engine").setLevel(
         logging.INFO if settings.DEBUG else logging.WARNING
     )
+    # OpenTelemetry logs a harmless ERROR ("Failed to detach context") when a
+    # span context token is detached in a different asyncio context than the one
+    # that attached it — common with streaming responses / async generators. It
+    # does not affect tracing or business logic, so silence this specific noise.
+    logging.getLogger("opentelemetry.context").setLevel(logging.CRITICAL)

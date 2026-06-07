@@ -67,6 +67,7 @@ def call_chat(
     key_var: str,
     base_url_var: str,
     temperature: float = 0,
+    extra_body: dict[str, Any] | None = None,
 ) -> bool:
     api_key = os.getenv(key_var, "")
     base_url = os.getenv(base_url_var, "")
@@ -81,6 +82,8 @@ def call_chat(
         "max_tokens": 16,
         "stream": False,
     }
+    if extra_body:
+        body.update(extra_body)
     request = urllib.request.Request(
         chat_url(base_url),
         data=json.dumps(body).encode("utf-8"),
@@ -116,6 +119,14 @@ def main() -> int:
     load_env_file(ENV_FILE)
 
     checks = [
+        (
+            "aliyun-bailian",
+            "deepseek-v4-pro",
+            "ALIYUN_BAILIAN_API_KEY",
+            "ALIYUN_BAILIAN_BASE_URL",
+            0,
+            {"enable_thinking": False},
+        ),
         ("aliyun-bailian", "MiniMax/MiniMax-M2.7", "ALIYUN_BAILIAN_API_KEY", "ALIYUN_BAILIAN_BASE_URL"),
         ("aliyun-bailian", "kimi/kimi-k2.6", "ALIYUN_BAILIAN_API_KEY", "ALIYUN_BAILIAN_BASE_URL"),
         ("aliyun-bailian", "ZHIPU/GLM-5.1", "ALIYUN_BAILIAN_API_KEY", "ALIYUN_BAILIAN_BASE_URL"),

@@ -3,7 +3,7 @@ Conversation repository — data access for conversations table
 """
 from datetime import datetime
 
-from sqlalchemy import false, select, func
+from sqlalchemy import false, or_, select, func, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.conversation import Conversation
@@ -151,6 +151,35 @@ class ConversationRepository:
         return item
 
     @staticmethod
+    async def update_title_if_overwritable(
+        db: AsyncSession,
+        conversation_id: int,
+        new_title: str,
+        fallback_title: str,
+    ) -> bool:
+        """Atomically set the title only when it is still empty or equal to the
+        first-user-message fallback.
+
+        Done as a single conditional UPDATE so a preset (Embed) or human title
+        set while the title-summary LLM call was in flight is never clobbered.
+        Returns True when a row was actually updated.
+        """
+        result = await db.execute(
+            sa_update(Conversation)
+            .where(
+                Conversation.id == conversation_id,
+                or_(
+                    Conversation.title.is_(None),
+                    Conversation.title == "",
+                    Conversation.title == fallback_title,
+                ),
+            )
+            .values(title=new_title)
+        )
+        await db.commit()
+        return (result.rowcount or 0) > 0
+
+    @staticmethod
     async def increment_counters(
         db: AsyncSession,
         conversation_id: int,
@@ -159,6 +188,7 @@ class ConversationRepository:
         llm_call_count: int = 0,
         tool_call_count: int = 0,
         input_tokens: int = 0,
+        cached_tokens: int = 0,
         output_tokens: int = 0,
         total_tokens: int = 0,
     ) -> None:
@@ -174,6 +204,8 @@ class ConversationRepository:
             item.tool_call_count = (item.tool_call_count or 0) + tool_call_count
         if input_tokens:
             item.total_input_tokens = (item.total_input_tokens or 0) + input_tokens
+        if cached_tokens:
+            item.total_cached_tokens = (item.total_cached_tokens or 0) + cached_tokens
         if output_tokens:
             item.total_output_tokens = (item.total_output_tokens or 0) + output_tokens
         if total_tokens:

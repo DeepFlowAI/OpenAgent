@@ -232,6 +232,24 @@ class TestConversationSettingsConfig:
             )
 
 
+class TestEngineConfigSystemPrompt:
+
+    def test_system_prompt_accepts_30000_chars(self):
+        config = EngineConfig(system_prompt="a" * 30000)
+
+        assert len(config.system_prompt) == 30000
+
+    def test_system_prompt_rejects_more_than_30000_chars(self):
+        with pytest.raises(ValidationError):
+            EngineConfigUpdate(system_prompt="a" * 30001)
+
+    def test_engine_config_update_json_schema_exposes_30000_char_limit(self):
+        schema = EngineConfigUpdate.model_json_schema()
+        system_prompt_schema = schema["properties"]["system_prompt"]
+
+        assert system_prompt_schema["anyOf"][0]["maxLength"] == 30000
+
+
 class TestEngineConfigUpdate:
 
     def test_conversation_settings_update_requires_complete_section_object(self):

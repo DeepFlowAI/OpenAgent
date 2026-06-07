@@ -320,7 +320,7 @@ ENDPOINTS: tuple[EndpointDoc, ...] = (
         summary="Partially update system_prompt, model, selected_tool_ids, context, or pre_recall.",
         path_params=[_param("agent_id", "integer", True, "Agent ID.")],
         body_fields=[
-            _param("system_prompt", "string", False, "System prompt, max 10000 chars."),
+            _param("system_prompt", "string", False, "System prompt, max 30000 chars."),
             _param("model", "object", False, "Model config."),
             _param("selected_tool_ids", "array[integer]", False, "Enabled tool IDs."),
             _param("context", "object", False, "Context policy."),

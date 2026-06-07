@@ -38,6 +38,7 @@ class ConversationStep(Base):
     finish_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cached_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)

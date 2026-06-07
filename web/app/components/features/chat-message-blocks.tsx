@@ -294,6 +294,92 @@ export function ToolBlockUI({
   )
 }
 
+/**
+ * Wraps the interleaved thinking/tool/intermediate-content timeline. The
+ * collapsed/expanded default is derived deterministically from `isStreaming`
+ * rather than from observing a streaming→done transition: expanded while the
+ * turn streams, collapsed into a one-line summary once finished. This keeps
+ * the state stable across refreshes, history loads, and remounts (e.g. when
+ * scrolling re-mounts the message subtree), where a transition would never be
+ * observed. User toggles win for the current mount.
+ */
+export function IntermediateSteps({
+  thinkingBlocks,
+  toolBlocks,
+  inlineContentBlocks,
+  isStreaming,
+  onInspect,
+  samePageNavigationUrlAllowlist,
+}: {
+  thinkingBlocks: ThinkingBlock[]
+  toolBlocks: ToolBlock[]
+  inlineContentBlocks: ContentBlock[]
+  isStreaming: boolean
+  onInspect?: (stepId: number) => void
+  samePageNavigationUrlAllowlist?: readonly string[]
+}) {
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null)
+
+  const entries = [
+    ...thinkingBlocks.map(b => ({ type: 'thinking' as const, block: b, idx: b.timelineIndex ?? 0 })),
+    ...toolBlocks.map(b => ({ type: 'tool' as const, block: b, idx: b.timelineIndex ?? 0 })),
+    ...inlineContentBlocks.map(b => ({ type: 'content' as const, block: b, idx: b.timelineIndex ?? 0 })),
+  ].sort((a, b) => a.idx - b.idx)
+
+  if (entries.length === 0) return null
+
+  const open = manualOpen !== null ? manualOpen : isStreaming
+
+  const summaryParts: string[] = []
+  if (thinkingBlocks.length > 0) summaryParts.push('已思考')
+  if (toolBlocks.length > 0) summaryParts.push(`调用了 ${toolBlocks.length} 个工具`)
+  const summary = summaryParts.join(' · ') || '查看过程'
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setManualOpen(true)}
+        className="mb-1 flex items-center gap-1.5 self-start rounded-lg border border-[#E4E4E7] bg-white px-3 py-1.5 text-xs text-[#71717A] transition-colors hover:text-[#1A1A1A]"
+      >
+        <IconChevronRight size={14} />
+        <span>{summary}</span>
+      </button>
+    )
+  }
+
+  return (
+    <>
+      {!isStreaming && (
+        <button
+          type="button"
+          onClick={() => setManualOpen(false)}
+          className="mb-1 flex items-center gap-1.5 self-start text-xs text-[#A1A1AA] transition-colors hover:text-[#71717A]"
+        >
+          <IconChevronDown size={14} />
+          <span>{summary}</span>
+        </button>
+      )}
+      {entries.map(entry => {
+        switch (entry.type) {
+          case 'thinking':
+            return <ThinkingBlockUI key={entry.block.id} block={entry.block} onInspect={onInspect} />
+          case 'tool':
+            return <ToolBlockUI key={entry.block.id} block={entry.block} onInspect={onInspect} />
+          case 'content':
+            return (
+              <InlineContentUI
+                key={entry.block.id}
+                block={entry.block}
+                samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
+              />
+            )
+        }
+      })}
+    </>
+  )
+}
+
 function StreamingCursor({ active }: { active: boolean }) {
   if (!active) return null
   return (

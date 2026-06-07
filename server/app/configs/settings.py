@@ -93,6 +93,17 @@ class Settings(BaseSettings):
     # ``aliyun-bailian,openrouter``). Empty = built-in multi-provider fallback chain.
     LLM_PROVIDER_CHANNELS: str = Field(default="")
 
+    # ── Conversation title summary ──
+    # After a conversation's first round completes, asynchronously generate a
+    # short one-line summary title and store it on ``conversations.title`` for
+    # the Web SDK history list. Best-effort: failures keep the first-user-message
+    # fallback title untouched and never affect the chat hot path.
+    CONVERSATION_TITLE_ENABLED: bool = Field(default=True)
+    CONVERSATION_TITLE_MODEL: str = Field(default="qwen3.6-flash")
+    CONVERSATION_TITLE_MAX_CHARS: int = Field(default=15, ge=4, le=40)
+    CONVERSATION_TITLE_TEMPERATURE: float = Field(default=0.3, ge=0.0, le=1.0)
+    CONVERSATION_TITLE_MAX_TOKENS: int = Field(default=30, ge=8, le=128)
+
     # ── Default Tenant (auto-provisioned on first startup) ────────────────
     # On first boot, if the `tenants` table is empty, the seed step creates
     # one tenant using these values. Open-source users log in at `/login`
@@ -115,6 +126,9 @@ class Settings(BaseSettings):
     EMBEDDING_PROVIDER: str = Field(default="")
     RERANKER_PROVIDER: str = Field(default="")
     EMBEDDING_MODEL: str = Field(default="Pro/BAAI/bge-m3")
+    # Backup embedding model used when the primary model keeps failing
+    # (same provider). Empty disables failover. See SiliconFlowEmbeddingProvider.
+    EMBEDDING_FALLBACK_MODEL: str = Field(default="BAAI/bge-m3")
     RERANKER_MODEL: str = Field(default="Pro/BAAI/bge-reranker-v2-m3")
     EMBEDDING_DIMENSION: int = Field(default=1024, ge=64)
     EMBEDDING_BATCH_SIZE: int = Field(default=10, ge=1, le=25)

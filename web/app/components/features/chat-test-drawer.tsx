@@ -28,9 +28,7 @@ import { endConversation } from '@/service/use-conversation'
 import { LlmDetailModal } from '@/app/components/features/llm-detail-modal'
 import { useStepDetail } from '@/service/use-conversation-step'
 import {
-  ThinkingBlockUI,
-  ToolBlockUI,
-  InlineContentUI,
+  IntermediateSteps,
   MarkdownContent,
   StreamingMarkdownContent,
   StreamingThinkingPlaceholder,
@@ -666,23 +664,13 @@ function AssistantMessage({
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col gap-[6px]">
-        {[
-          ...message.thinkingBlocks.map(b => ({ type: 'thinking' as const, block: b, idx: b.timelineIndex ?? 0 })),
-          ...message.toolBlocks.map(b => ({ type: 'tool' as const, block: b, idx: b.timelineIndex ?? 0 })),
-          ...inlineContentBlocks.map(b => ({ type: 'content' as const, block: b, idx: b.timelineIndex ?? 0 })),
-        ]
-          .sort((a, b) => a.idx - b.idx)
-          .map(entry => {
-            switch (entry.type) {
-              case 'thinking':
-                return <ThinkingBlockUI key={entry.block.id} block={entry.block} onInspect={onInspect} />
-              case 'tool':
-                return <ToolBlockUI key={entry.block.id} block={entry.block} onInspect={onInspect} />
-              case 'content':
-                return <InlineContentUI key={entry.block.id} block={entry.block} />
-            }
-          })
-        }
+        <IntermediateSteps
+          thinkingBlocks={message.thinkingBlocks}
+          toolBlocks={message.toolBlocks}
+          inlineContentBlocks={inlineContentBlocks}
+          isStreaming={message.isStreaming}
+          onInspect={onInspect}
+        />
 
         {message.errorMessage && !message.isStreaming && (
           <div

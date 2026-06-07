@@ -21,7 +21,7 @@ gitpython
 pyyaml
 
 # LLM Gateway
-litellm
+litellm==1.86.2
 
 # AI Search - Embedding & Vector
 pgvector

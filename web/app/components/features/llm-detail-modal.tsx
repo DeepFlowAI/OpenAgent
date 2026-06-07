@@ -23,6 +23,23 @@ type LlmDetailModalProps = {
 type TabKey = 'request' | 'response'
 type ViewMode = 'formatted' | 'json'
 
+function getCachedTokenRatio(
+  cachedTokens: number | null | undefined,
+  inputTokens: number | null | undefined
+) {
+  if (cachedTokens === null || cachedTokens === undefined) return null
+  if (!inputTokens || inputTokens <= 0) return null
+  return cachedTokens / inputTokens
+}
+
+function getCachedTokenPercentage(
+  cachedTokens: number | null | undefined,
+  inputTokens: number | null | undefined
+) {
+  const ratio = getCachedTokenRatio(cachedTokens, inputTokens)
+  return ratio === null ? null : `${(ratio * 100).toFixed(1)}%`
+}
+
 export function LlmDetailModal({ open, onClose, step, isLoading }: LlmDetailModalProps) {
   const [activeTab, setActiveTab] = useState<TabKey>('request')
   const [viewMode, setViewMode] = useState<ViewMode>('formatted')
@@ -71,6 +88,14 @@ export function LlmDetailModal({ open, onClose, step, isLoading }: LlmDetailModa
     return String(n)
   }
 
+  const formatCachedTokens = (
+    cachedTokens: number | null | undefined,
+    inputTokens: number | null | undefined
+  ) => {
+    const percent = getCachedTokenPercentage(cachedTokens, inputTokens) ?? '—'
+    return `${formatTokens(cachedTokens ?? null)} (${percent})`
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
@@ -114,6 +139,10 @@ export function LlmDetailModal({ open, onClose, step, isLoading }: LlmDetailModa
                 }
               />
               <MetaItem label="输入" value={formatTokens(step.input_tokens)} />
+              <MetaItem
+                label="缓存命中"
+                value={formatCachedTokens(step.cached_tokens, step.input_tokens)}
+              />
               <MetaItem label="输出" value={formatTokens(step.output_tokens)} />
               <MetaItem
                 label="总 Token"
@@ -454,6 +483,8 @@ function ResponseContent({ step, viewMode, onCopy, copiedField }: ContentProps) 
       finish_reason: step.finish_reason,
       usage: {
         input_tokens: step.input_tokens,
+        cached_tokens: step.cached_tokens,
+        cached_token_percentage: getCachedTokenPercentage(step.cached_tokens, step.input_tokens),
         output_tokens: step.output_tokens,
         total_tokens: step.total_tokens,
       },

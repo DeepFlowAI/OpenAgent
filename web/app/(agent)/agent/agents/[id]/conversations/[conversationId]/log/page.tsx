@@ -285,6 +285,16 @@ export default function ConversationLogPage() {
     return String(n)
   }
 
+  const formatCachedTokens = (
+    cachedTokens: number | null | undefined,
+    inputTokens: number | null | undefined
+  ) => {
+    const percent = !inputTokens || cachedTokens === null || cachedTokens === undefined
+      ? '—'
+      : `${((cachedTokens / inputTokens) * 100).toFixed(1)}%`
+    return `${formatTokens(cachedTokens)} (${percent})`
+  }
+
   const formatDuration = () => {
     if (!conversation?.duration_seconds) return '—'
     const s = conversation.duration_seconds
@@ -615,6 +625,15 @@ export default function ConversationLogPage() {
               <SideInfoRow label="输入 Token">
                 <span className="text-xs text-[#1a1a1a]">
                   {formatTokens(conversation.total_input_tokens)}
+                </span>
+              </SideInfoRow>
+
+              <SideInfoRow label="缓存命中 Token">
+                <span className="text-xs text-[#1a1a1a]">
+                  {formatCachedTokens(
+                    conversation.total_cached_tokens,
+                    conversation.total_input_tokens
+                  )}
                 </span>
               </SideInfoRow>
 
