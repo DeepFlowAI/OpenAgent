@@ -260,6 +260,12 @@ def normalize_human_handoff_arguments(
     return result
 
 
+# Tool name doubles as the LLM function-call name, which OpenAI requires to
+# match this pattern. Enforced only on write schemas (create/update) so that
+# legacy tools with non-conforming names can still be read and listed.
+TOOL_NAME_PATTERN = r"^[a-zA-Z0-9_-]+$"
+
+
 class AgentToolBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str | None = None
@@ -267,11 +273,12 @@ class AgentToolBase(BaseModel):
 
 
 class AgentToolCreate(AgentToolBase):
+    name: str = Field(..., min_length=1, max_length=128, pattern=TOOL_NAME_PATTERN)
     config: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentToolUpdate(BaseModel):
-    name: str | None = Field(None, min_length=1, max_length=128)
+    name: str | None = Field(None, min_length=1, max_length=128, pattern=TOOL_NAME_PATTERN)
     description: str | None = None
     config: dict[str, Any] | None = None
 

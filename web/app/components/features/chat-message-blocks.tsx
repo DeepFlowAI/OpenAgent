@@ -22,7 +22,7 @@ import {
 import type { ThinkingBlock, ContentBlock, ToolBlock } from '@/models/conversation'
 import type { PluggableList } from 'unified'
 
-const MarkdownPreview = dynamic(() => import('@uiw/react-markdown-preview'), {
+const MarkdownPreview = dynamic(() => import('@uiw/react-markdown-preview/nohighlight'), {
   ssr: false,
 })
 
@@ -456,7 +456,7 @@ export function MarkdownContent({
 
   return (
     // leading-[26px] matches chat user bubble; avoid leading-relaxed stacking with @uiw .wmde-markdown { line-height: 1.5 }
-    <div className="text-sm leading-[26px]" data-color-mode="light" onClick={handleClick}>
+    <div className="chat-markdown text-sm leading-[26px]" data-color-mode="light" onClick={handleClick}>
       <MarkdownPreview
         source={source}
         style={{ background: 'transparent', fontSize: 14, ...style }}

@@ -18,7 +18,7 @@ async def test_kb_sync_lock_raises_when_busy(monkeypatch):
     # The lock is held on a dedicated engine connection, not the session.
     fake_engine = MagicMock()
     fake_engine.connect = AsyncMock(return_value=conn)
-    monkeypatch.setattr(sync_service.db_session, "engine", fake_engine)
+    monkeypatch.setattr(sync_service.db_session, "lock_engine", fake_engine)
     db = AsyncMock()
 
     with pytest.raises(ConflictError, match="already in progress"):
@@ -37,7 +37,7 @@ async def test_kb_sync_lock_releases_on_exit(monkeypatch):
     ])
     fake_engine = MagicMock()
     fake_engine.connect = AsyncMock(return_value=conn)
-    monkeypatch.setattr(sync_service.db_session, "engine", fake_engine)
+    monkeypatch.setattr(sync_service.db_session, "lock_engine", fake_engine)
     db = AsyncMock()
 
     async with sync_service._kb_sync_lock(db, kb_id=2):
@@ -290,7 +290,7 @@ async def test_kb_sync_lock_with_recovery_retries_after_orphan_clear(monkeypatch
     ])
     fake_engine = MagicMock()
     fake_engine.connect = AsyncMock(return_value=conn)
-    monkeypatch.setattr(sync_service.db_session, "engine", fake_engine)
+    monkeypatch.setattr(sync_service.db_session, "lock_engine", fake_engine)
     db = AsyncMock()
 
     clear = AsyncMock(return_value=1)

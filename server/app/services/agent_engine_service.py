@@ -5,6 +5,7 @@ step logging, and SSE event streaming for a single chat round.
 import asyncio
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -225,7 +226,9 @@ async def _hold_round_lock(
     # (advisory locks survive rollback/return-to-pool) and making the unlock
     # below fail with "This Connection is closed". A connection we own for the
     # whole round is never recycled mid-flight, so we can always release it.
-    conn = await db_session.engine.connect()
+    # Use the dedicated lock pool so these whole-round connections don't starve
+    # the main request pool (the QueuePool-exhaustion fix).
+    conn = await db_session.lock_engine.connect()
     deadline = time.monotonic() + timeout_sec
     poll_sec = 0.1
     locked_round_number: int | None = None
@@ -303,8 +306,9 @@ async def _hold_specific_round_lock(
 ) -> AsyncIterator[None]:
     """Acquire one fixed round lock with the same wait policy as chat rounds."""
     # Dedicated connection — see ``_hold_round_lock`` for why the session's
-    # own connection cannot safely hold a session-level advisory lock.
-    conn = await db_session.engine.connect()
+    # own connection cannot safely hold a session-level advisory lock. Uses the
+    # dedicated lock pool to avoid starving the main request pool.
+    conn = await db_session.lock_engine.connect()
     deadline = time.monotonic() + timeout_sec
     poll_sec = 0.1
     locked = False
@@ -2561,7 +2565,7 @@ async def _load_tools(db: AsyncSession, agent_id: int, selected_ids: list[int]) 
     if not selected_ids:
         return []
     tools = await AgentToolRepository.get_by_agent_id(db, agent_id)
-    return [
+    defs = [
         {
             "id": t.id,
             "name": t.name,
@@ -2573,6 +2577,8 @@ async def _load_tools(db: AsyncSession, agent_id: int, selected_ids: list[int]) 
         for t in tools
         if t.id in selected_ids and t.is_enabled
     ]
+    _apply_safe_tool_names(defs)
+    return defs
 
 
 async def _filter_runtime_tools(
@@ -2641,6 +2647,39 @@ def _runtime_parameters_schema(tool) -> dict | None:
     if getattr(tool, "tool_type", None) == HUMAN_HANDOFF_TOOL_TYPE:
         return build_human_handoff_parameters_schema(getattr(tool, "config", {}) or {})
     return tool.parameters_schema
+
+
+_TOOL_NAME_INVALID_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+
+
+def _safe_tool_name(name: str, tool_id: int) -> str:
+    """Coerce a tool name into an OpenAI-safe function name.
+
+    OpenAI requires ``function.name`` to match ``^[a-zA-Z0-9_-]+$`` (max 64).
+    Names with other characters (e.g. CJK) would otherwise crash the chat
+    stream with a BadRequestError, so replace invalid runs with ``_`` and fall
+    back to ``tool_<id>`` when nothing usable remains (e.g. pure-CJK names).
+    """
+    cleaned = _TOOL_NAME_INVALID_RE.sub("_", name or "").strip("_")
+    if not cleaned:
+        cleaned = f"tool_{tool_id}"
+    return cleaned[:64]
+
+
+def _apply_safe_tool_names(tools: list[dict]) -> None:
+    """Rewrite tool names in place to OpenAI-safe, batch-unique values.
+
+    The sanitized name becomes the single canonical name used everywhere in the
+    engine (sent to the LLM, returned in tool calls, matched against
+    ``tools_defs``), keeping lookups consistent.
+    """
+    seen: set[str] = set()
+    for t in tools:
+        safe = _safe_tool_name(t["name"], t["id"])
+        if safe in seen:
+            safe = f"{safe}_{t['id']}"[:64]
+        seen.add(safe)
+        t["name"] = safe
 
 
 def _to_openai_tools(tools: list[dict]) -> list[dict]:

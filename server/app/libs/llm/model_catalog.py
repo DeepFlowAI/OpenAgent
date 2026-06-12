@@ -15,6 +15,8 @@ class UiModelOption:
 DEFAULT_UI_MODELS: tuple[UiModelOption, ...] = (
     UiModelOption("gpt-4o", "GPT-4o"),
     UiModelOption("deepseek-v4-pro", "DeepSeek V4 Pro"),
+    UiModelOption("deepseek-v4-pro-official", "DeepSeek V4 Pro 官方"),
+    UiModelOption("deepseek-v4-flash", "deepseek v4 flash 官方"),
     UiModelOption("kimi-k2.5", "Kimi K2.5"),
     UiModelOption("kimi-k2.6", "Kimi K2.6"),
     UiModelOption("glm-5", "GLM-5"),

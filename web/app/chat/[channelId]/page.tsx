@@ -604,9 +604,7 @@ function SidebarContent({
             const status = conversationStatuses.get(conv.conversationId)
             const statusLabel = status === 'active' || status === 'detached' || status === 'resuming'
               ? '生成中'
-              : status === 'error'
-                ? '失败'
-                : ''
+              : ''
             return (
               <button
                 type="button"

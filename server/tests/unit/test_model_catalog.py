@@ -9,6 +9,12 @@ def test_parse_llm_ui_models_default_catalog():
     assert ("deepseek-v4-pro", "DeepSeek V4 Pro") in [
         (m.value, m.label) for m in models
     ]
+    assert ("deepseek-v4-pro-official", "DeepSeek V4 Pro 官方") in [
+        (m.value, m.label) for m in models
+    ]
+    assert ("deepseek-v4-flash", "deepseek v4 flash 官方") in [
+        (m.value, m.label) for m in models
+    ]
 
 
 def test_parse_llm_ui_models_custom_entries():
@@ -120,6 +126,85 @@ def test_model_candidates_deepseek_prefers_bailian_when_available(monkeypatch):
         candidates[0]["api_base"]
         == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     )
+
+
+def test_model_candidates_deepseek_official_option_skips_bailian(monkeypatch):
+    monkeypatch.setattr(litellm_client.settings, "LLM_PROVIDER_CHANNELS", "")
+    monkeypatch.setattr(litellm_client.settings, "ALIYUN_BAILIAN_API_KEY", "bailian-key")
+    monkeypatch.setattr(
+        litellm_client.settings,
+        "ALIYUN_BAILIAN_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    monkeypatch.setattr(litellm_client.settings, "DEEPSEEK_API_KEY", "deepseek-key")
+    monkeypatch.setattr(
+        litellm_client.settings,
+        "DEEPSEEK_API_BASE_URL",
+        "https://api.deepseek.com",
+    )
+    monkeypatch.setattr(litellm_client.settings, "OPENROUTER_API_KEY", "or-key")
+
+    candidates = litellm_client._model_candidates("deepseek-v4-pro-official")
+
+    assert [c["channel"] for c in candidates] == ["deepseek-official", "openrouter"]
+    assert [c["model"] for c in candidates] == [
+        "openai/deepseek-v4-pro",
+        "openrouter/deepseek/deepseek-v4-pro",
+    ]
+    assert candidates[0]["api_key"] == "deepseek-key"
+    assert candidates[0]["api_base"] == "https://api.deepseek.com"
+
+
+def test_model_candidates_deepseek_official_option_not_mapped_to_bailian(monkeypatch):
+    monkeypatch.setattr(
+        litellm_client.settings,
+        "LLM_PROVIDER_CHANNELS",
+        "aliyun-bailian,openrouter",
+    )
+    monkeypatch.setattr(litellm_client.settings, "ALIYUN_BAILIAN_API_KEY", "bailian-key")
+    monkeypatch.setattr(litellm_client.settings, "OPENROUTER_API_KEY", "or-key")
+
+    candidates = litellm_client._model_candidates("deepseek-v4-pro-official")
+
+    assert [c["channel"] for c in candidates] == ["openrouter"]
+    assert candidates[0]["model"] == "openrouter/deepseek/deepseek-v4-pro"
+
+
+def test_model_candidates_deepseek_flash_uses_official(monkeypatch):
+    monkeypatch.setattr(litellm_client.settings, "LLM_PROVIDER_CHANNELS", "")
+    monkeypatch.setattr(litellm_client.settings, "ALIYUN_BAILIAN_API_KEY", "bailian-key")
+    monkeypatch.setattr(litellm_client.settings, "DEEPSEEK_API_KEY", "deepseek-key")
+    monkeypatch.setattr(
+        litellm_client.settings,
+        "DEEPSEEK_API_BASE_URL",
+        "https://api.deepseek.com",
+    )
+    monkeypatch.setattr(litellm_client.settings, "OPENROUTER_API_KEY", "or-key")
+
+    candidates = litellm_client._model_candidates("deepseek-v4-flash")
+
+    assert [c["channel"] for c in candidates] == ["deepseek-official", "openrouter"]
+    assert [c["model"] for c in candidates] == [
+        "openai/deepseek-v4-flash",
+        "openrouter/deepseek/deepseek-v4-flash",
+    ]
+    assert candidates[0]["api_key"] == "deepseek-key"
+    assert candidates[0]["api_base"] == "https://api.deepseek.com"
+
+
+def test_model_candidates_deepseek_flash_not_mapped_to_bailian(monkeypatch):
+    monkeypatch.setattr(
+        litellm_client.settings,
+        "LLM_PROVIDER_CHANNELS",
+        "aliyun-bailian,openrouter",
+    )
+    monkeypatch.setattr(litellm_client.settings, "ALIYUN_BAILIAN_API_KEY", "bailian-key")
+    monkeypatch.setattr(litellm_client.settings, "OPENROUTER_API_KEY", "or-key")
+
+    candidates = litellm_client._model_candidates("deepseek-v4-flash")
+
+    assert [c["channel"] for c in candidates] == ["openrouter"]
+    assert candidates[0]["model"] == "openrouter/deepseek/deepseek-v4-flash"
 
 
 def test_deepseek_thinking_request_params_preserve_reasoning_content():

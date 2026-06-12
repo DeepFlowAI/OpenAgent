@@ -8,7 +8,7 @@ from app.configs.settings import settings
 from app.core.exceptions import register_exception_handlers
 from app.db.migration import run_migrations
 from app.db.seed import seed_system_defaults
-from app.db.session import AsyncSessionLocal, engine
+from app.db.session import AsyncSessionLocal, engine, lock_engine
 from app.extensions import load_extensions
 from app.libs.observability import init_observability, shutdown_observability
 from app.routers import register_routers
@@ -37,6 +37,7 @@ async def lifespan(app: FastAPI):
 
             await redis_client.close()
         await engine.dispose()
+        await lock_engine.dispose()
         # Flush remaining batched spans/logs before the process exits.
         shutdown_observability()
 

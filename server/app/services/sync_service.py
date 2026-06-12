@@ -320,8 +320,10 @@ async def _kb_sync_lock(db: AsyncSession, kb_id: int):
     to the pool, which would orphan this session-level advisory lock onto a
     pooled connection (it survives rollback/return-to-pool) and leak it. A
     connection we own for the whole job is never recycled, so we always release.
+    Uses the dedicated lock pool so long-held sync locks don't starve the main
+    request pool.
     """
-    conn = await db_session.engine.connect()
+    conn = await db_session.lock_engine.connect()
     try:
         acquired = bool((await conn.execute(
             text("SELECT pg_try_advisory_lock(:k1, :k2)"),
@@ -349,7 +351,7 @@ async def _kb_sync_lock_with_recovery(
     """
     last_exc = ConflictError("Knowledge base sync is already in progress")
     for attempt in range(2):
-        conn = await db_session.engine.connect()
+        conn = await db_session.lock_engine.connect()
         acquired = False
         try:
             acquired = bool((await conn.execute(

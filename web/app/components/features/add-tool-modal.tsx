@@ -50,6 +50,10 @@ export function AddToolModal({
       setError('工具名称不能为空')
       return
     }
+    if (!/^[a-zA-Z0-9_-]+$/.test(trimmedName)) {
+      setError('工具名称只能包含字母、数字、下划线和连字符（作为 LLM function name，不支持中文或空格）')
+      return
+    }
     if (existingNames.includes(trimmedName)) {
       setError('工具名称已存在')
       return

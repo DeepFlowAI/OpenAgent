@@ -23,6 +23,25 @@ class Settings(BaseSettings):
         default=True, description="Run alembic upgrade head on startup"
     )
 
+    # ── DB connection pools ──
+    # Two pools share one PostgreSQL: the main pool serves short-lived request
+    # queries; the lock pool serves the per-round advisory-lock connection that
+    # is pinned for an entire streaming chat round. Keep
+    # (DB_POOL_SIZE + DB_MAX_OVERFLOW) + (DB_LOCK_POOL_SIZE + DB_LOCK_MAX_OVERFLOW)
+    # comfortably under PostgreSQL ``max_connections`` (default 100).
+    DB_POOL_SIZE: int = Field(default=20, ge=1)
+    DB_MAX_OVERFLOW: int = Field(default=20, ge=0)
+    # Lock pool sizing bounds the max concurrent in-flight chat rounds, since
+    # each round pins one lock connection for its whole duration.
+    DB_LOCK_POOL_SIZE: int = Field(default=20, ge=1)
+    DB_LOCK_MAX_OVERFLOW: int = Field(default=20, ge=0)
+    # Seconds to wait for a free connection before failing (was the implicit 30s
+    # that produced the "QueuePool limit ... connection timed out" errors).
+    DB_POOL_TIMEOUT: float = Field(default=30.0, gt=0)
+    # Recycle connections older than this (seconds) to dodge stale server-side
+    # disconnects; 1800s is a safe default for most managed PostgreSQL.
+    DB_POOL_RECYCLE: int = Field(default=1800, ge=-1)
+
     REDIS_URL: str | None = Field(default=None)
 
     SECRET_KEY: str = Field(default="change-me")

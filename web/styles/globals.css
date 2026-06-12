@@ -89,6 +89,37 @@ body {
   background: #000000;
 }
 
+.chat-markdown .wmde-markdown pre {
+  margin: 8px 0;
+  padding: 12px;
+  overflow-x: auto;
+  color: #18181B;
+  background: #F4F4F5;
+  border: 1px solid #E4E4E7;
+  border-radius: 6px;
+}
+
+.chat-markdown .wmde-markdown pre > code {
+  display: block;
+  padding: 0;
+  overflow: visible;
+  color: inherit;
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre;
+}
+
+.chat-markdown .wmde-markdown :not(pre) > code {
+  color: inherit;
+  background: #F4F4F5;
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
 /* Visitor-site Markdown body — minimal Tailwind-friendly typography. */
 .prose-doc {
   color: #1a1a1a;

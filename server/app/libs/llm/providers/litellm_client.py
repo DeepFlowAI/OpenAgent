@@ -42,6 +42,8 @@ _MAX_LOG_LEN = 2000
 OPENROUTER_MODEL_MAP: dict[str, str] = {
     "gpt-4o": "openrouter/openai/gpt-4o",
     "deepseek-v4-pro": "openrouter/deepseek/deepseek-v4-pro",
+    "deepseek-v4-pro-official": "openrouter/deepseek/deepseek-v4-pro",
+    "deepseek-v4-flash": "openrouter/deepseek/deepseek-v4-flash",
     "kimi-k2.5": "openrouter/moonshotai/kimi-k2.5",
     "kimi-k2.6": "openrouter/moonshotai/kimi-k2.6",
     "glm-5": "openrouter/z-ai/glm-5",
@@ -85,6 +87,18 @@ OFFICIAL_MODEL_MAP: dict[str, dict] = {
         "api_key_setting": "DEEPSEEK_API_KEY",
         "api_base_setting": "DEEPSEEK_API_BASE_URL",
     },
+    "deepseek-v4-pro-official": {
+        "channel": "deepseek-official",
+        "model": "openai/deepseek-v4-pro",
+        "api_key_setting": "DEEPSEEK_API_KEY",
+        "api_base_setting": "DEEPSEEK_API_BASE_URL",
+    },
+    "deepseek-v4-flash": {
+        "channel": "deepseek-official",
+        "model": "openai/deepseek-v4-flash",
+        "api_key_setting": "DEEPSEEK_API_KEY",
+        "api_base_setting": "DEEPSEEK_API_BASE_URL",
+    },
     "minimax-m2.7": {
         "channel": "minimax-official",
         "model": "openai/MiniMax-M2.7",
@@ -110,6 +124,10 @@ SILICONFLOW_MODEL_MAP: dict[str, str] = {
     "kimi-k2.6": "openai/Pro/moonshotai/Kimi-K2.6",
     "glm-5.1": "openai/Pro/zai-org/GLM-5.1",
 }
+
+OFFICIAL_ONLY_MODEL_IDS: frozenset[str] = frozenset(
+    {"deepseek-v4-pro-official", "deepseek-v4-flash"}
+)
 
 PROVIDER_CHANNEL_NAMES: dict[str, str] = {
     "aliyun-bailian": "阿里百炼",
@@ -354,6 +372,8 @@ def _parse_provider_channels(raw: str) -> list[str] | None:
 
 
 def _bailian_candidate(model: str, *, allow_unmapped: bool = False) -> dict | None:
+    if model in OFFICIAL_ONLY_MODEL_IDS:
+        return None
     if not settings.ALIYUN_BAILIAN_API_KEY:
         return None
     bailian_model = BAILIAN_MODEL_MAP.get(model)
