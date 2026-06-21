@@ -26,7 +26,7 @@ class AgentStatusUpdate(BaseModel):
 
 
 class ModelConfig(BaseModel):
-    model_name: str = "gpt-4o"
+    model_name: str = "deepseek-v4-pro"
     first_round_thinking: bool = False
     subsequent_rounds_thinking: bool = False
     temperature: float = Field(default=0.01, ge=0, le=2)
@@ -51,7 +51,7 @@ class ModelConfig(BaseModel):
 class ContextConfig(BaseModel):
     max_rounds: int = Field(default=0, ge=0)
     history_tool_rounds: int = Field(default=0, ge=0, le=5)
-    recent_full_tool_responses: int = Field(default=1, ge=1, le=5)
+    recent_full_tool_responses: int = Field(default=1, ge=1, le=10)
     max_tool_loop_rounds: int = Field(default=20, ge=1, le=100)
 
 
@@ -93,6 +93,27 @@ class AIDisclaimerConfig(BaseModel):
         return self
 
 
+class FAQQuestionConfig(BaseModel):
+    text: str = Field(default="", max_length=100)
+
+
+class FAQCategoryConfig(BaseModel):
+    name: str = Field(default="", max_length=20)
+    questions: list[FAQQuestionConfig] = Field(default_factory=list)
+
+
+class FAQConfig(BaseModel):
+    enabled: bool = False
+    title: str = Field(default="常见问题", max_length=20)
+    categories: list[FAQCategoryConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_enabled_title(self) -> "FAQConfig":
+        if self.enabled and not self.title.strip():
+            raise ValueError("FAQ title is required when enabled")
+        return self
+
+
 class ToolCallLimitReplyConfig(BaseModel):
     enabled: bool = True
     content: str = Field(
@@ -110,6 +131,7 @@ class ToolCallLimitReplyConfig(BaseModel):
 
 class ConversationSettingsConfig(BaseModel):
     welcome_message: WelcomeMessageConfig = Field(default_factory=WelcomeMessageConfig)
+    faq: FAQConfig = Field(default_factory=FAQConfig)
     ai_disclaimer: AIDisclaimerConfig = Field(default_factory=AIDisclaimerConfig)
     tool_call_limit_reply: ToolCallLimitReplyConfig = Field(
         default_factory=ToolCallLimitReplyConfig
@@ -148,6 +170,7 @@ class EngineConfigUpdate(BaseModel):
 
         allowed_sections = {
             "welcome_message",
+            "faq",
             "ai_disclaimer",
             "tool_call_limit_reply",
         }
@@ -164,6 +187,15 @@ class EngineConfigUpdate(BaseModel):
         ):
             raise ValueError(
                 "conversation_settings.welcome_message must include enabled and blocks"
+            )
+
+        faq = settings.get("faq")
+        if "faq" in submitted_sections and (
+            not isinstance(faq, dict)
+            or not {"enabled", "title", "categories"}.issubset(faq.keys())
+        ):
+            raise ValueError(
+                "conversation_settings.faq must include enabled, title and categories"
             )
 
         disclaimer = settings.get("ai_disclaimer")

@@ -260,7 +260,7 @@ class DetachedChatStreamService:
         last_event_id: str | None,
     ) -> None:
         try:
-            async with db_session.AsyncSessionLocal() as db:
+            async with db_session.session_scope() as db:
                 stream = AgentEngineService.run_chat_round(
                     db,
                     agent_id=agent_id,
@@ -310,7 +310,7 @@ class DetachedChatStreamService:
         client_message_id: str | None,
         last_event_id: str | None,
     ) -> AsyncIterator[str]:
-        async with db_session.AsyncSessionLocal() as db:
+        async with db_session.session_scope() as db:
             stream = AgentEngineService.run_chat_round(
                 db,
                 agent_id=agent_id,

@@ -42,10 +42,17 @@ RUN sed -i "s|dl-cdn.alpinelinux.org|${ALPINE_MIRROR}|g" /etc/apk/repositories \
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# Build stamp: baked into the client bundle (NEXT_PUBLIC_APP_VERSION) and
+# written to public/version.json. The frontend polls version.json and compares
+# it to the baked value to detect a new deploy and prompt users to refresh.
+ARG APP_VERSION=dev
+ENV NEXT_PUBLIC_APP_VERSION=$APP_VERSION
+
 ENV APP_ENV=production \
     NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1
 
+RUN node -e "require('fs').writeFileSync('public/version.json', JSON.stringify({version: process.env.NEXT_PUBLIC_APP_VERSION || 'dev'}))"
 RUN npm run build
 
 FROM ${BASE_REGISTRY}/node:20-alpine AS runner

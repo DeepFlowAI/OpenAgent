@@ -293,7 +293,7 @@ async def _hold_round_lock(
                 # of letting it leak back into the pool.
                 await conn.invalidate()
     finally:
-        await conn.close()
+        await db_session.aclose_quietly(conn)
 
 
 @asynccontextmanager
@@ -358,7 +358,27 @@ async def _hold_specific_round_lock(
                     )
                     await conn.invalidate()
     finally:
-        await conn.close()
+        await db_session.aclose_quietly(conn)
+
+
+def _thinking_for_round(model_cfg, round_number: int) -> bool:
+    """Whether to enable thinking for every LLM call in this round.
+
+    Thinking is scoped to the whole round, never toggled per tool-loop call.
+    DeepSeek-style thinking models reject a continuation request whose prior
+    in-round assistant tool-call turn was produced without ``reasoning_content``
+    (e.g. the first-screen call ran with thinking off). Flipping thinking on for
+    a later call in the same round resends that earlier turn and 400s with
+    "The reasoning_content in the thinking mode must be passed back to the API".
+
+    Round 1 follows ``first_round_thinking`` (the first-screen latency switch);
+    every later round follows ``subsequent_rounds_thinking``.
+    """
+    return (
+        model_cfg.first_round_thinking
+        if round_number == 1
+        else model_cfg.subsequent_rounds_thinking
+    )
 
 
 def decide_stream_retry_action(
@@ -1242,17 +1262,13 @@ class AgentEngineService:
 
                 start_ms = _now_ms()
 
-                # "First-round thinking" is scoped to the very first LLM call of the
-                # whole conversation (round_number == 1 AND tool_round_idx == 0).
-                # Every other LLM call — whether subsequent tool-loop iterations in
-                # round 1 or any call in later rounds — uses `subsequent_rounds_thinking`.
-                # This matches the design intent of skipping thinking only to cut
-                # the *first-screen* latency, not every round's opening call.
+                # Thinking is scoped to the whole round (see _thinking_for_round):
+                # toggling it on for a mid-loop tool-call iteration would resend
+                # the first-screen call's thinking-off assistant turn without
+                # reasoning_content and trip DeepSeek's "reasoning_content must be
+                # passed back" 400. is_first_screen_call only labels the log below.
                 is_first_screen_call = (round_number == 1 and tool_round_idx == 0)
-                thinking_enabled = (
-                    model_cfg.first_round_thinking if is_first_screen_call
-                    else model_cfg.subsequent_rounds_thinking
-                )
+                thinking_enabled = _thinking_for_round(model_cfg, round_number)
 
                 logger.info(
                     "LLM call — round=%d, tool_round=%d, first_screen=%s, thinking=%s, "
@@ -1320,8 +1336,8 @@ class AgentEngineService:
                             stream_result is not None and stream_result.thinking_content
                         ):
                             try:
-                                await asyncio.shield(_persist_incomplete_llm_step(
-                                    db, conversation_id, agent.tenant_id,
+                                await asyncio.shield(_persist_incomplete_llm_step_isolated(
+                                    conversation_id, agent.tenant_id,
                                     round_number=round_number,
                                     stream_result=stream_result,
                                     messages=messages,
@@ -2557,6 +2573,25 @@ async def _persist_incomplete_llm_step(
     })
 
 
+async def _persist_incomplete_llm_step_isolated(
+    conversation_id: int,
+    tenant_id: str,
+    **kwargs,
+):
+    """Persist an incomplete step on a fresh, independently-owned session.
+
+    Used only on the cancellation path, where this write is wrapped in
+    ``asyncio.shield``. The round's request session is being torn down
+    concurrently (its close is shielded and completes promptly), so a shielded
+    persist that shared that session would race the close and fail with
+    "This transaction is closed". Owning the session here keeps the audit write
+    independent of the cancelled round's session lifecycle. ``_create_step``
+    commits on this session, so the row is durable once shield resolves.
+    """
+    async with db_session.session_scope() as db:
+        await _persist_incomplete_llm_step(db, conversation_id, tenant_id, **kwargs)
+
+
 async def _load_tools(db: AsyncSession, agent_id: int, selected_ids: list[int]) -> list[dict]:
     """Load enabled tools for the agent, filtered by selected_tool_ids.
 
@@ -2883,6 +2918,16 @@ async def _build_history(
         _tool_step_key(s) for s in archivable_tool_steps[-recent_full_limit:]
     }
 
+    # thinking_content lives on the llm_call step, but the final reply is a
+    # separate assistant_message step (linked via parent_step_id). Thinking
+    # models (e.g. deepseek-v4-pro) reject multi-turn requests whose prior
+    # assistant turn dropped its reasoning_content, so map it back by parent id.
+    llm_thinking_by_id = {
+        s["id"]: s.get("thinking_content")
+        for s in steps
+        if s["step_type"] == "llm_call" and s.get("thinking_content")
+    }
+
     messages: list[dict] = []
     actual_tool_trace_rounds: set[int] = set()
     for rn in sorted_round_nums:
@@ -2909,7 +2954,11 @@ async def _build_history(
             if st == "user_message" and s.get("content"):
                 messages.append({"role": "user", "content": s["content"]})
             elif st == "assistant_message" and s.get("content"):
-                messages.append({"role": "assistant", "content": s["content"]})
+                assistant_msg = {"role": "assistant", "content": s["content"]}
+                thinking_content = llm_thinking_by_id.get(s.get("parent_step_id"))
+                if thinking_content:
+                    assistant_msg["reasoning_content"] = thinking_content
+                messages.append(assistant_msg)
             elif include_tools and st == "llm_call" and s.get("response_tool_calls"):
                 response_tool_call_ids = {
                     tc.get("id")
@@ -3011,8 +3060,7 @@ async def _stream_llm_with_retry_events(
                 stream_result is not None and stream_result.thinking_content
             ):
                 try:
-                    await asyncio.shield(_persist_incomplete_llm_step(
-                        db,
+                    await asyncio.shield(_persist_incomplete_llm_step_isolated(
                         conversation_id,
                         tenant_id,
                         round_number=round_number,
@@ -3245,7 +3293,7 @@ async def _continue_after_failed_tool_result(
     messages = _assemble_messages(rendered_prompt, history, current_round_messages)
 
     model_cfg = config.model
-    thinking_enabled = model_cfg.subsequent_rounds_thinking
+    thinking_enabled = _thinking_for_round(model_cfg, round_number)
     stream_state: dict = {}
     async for event in _stream_llm_with_retry_events(
         db,

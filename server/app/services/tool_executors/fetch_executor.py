@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.conversation_step import ConversationStep
-from app.services.tool_executors.base import BaseToolExecutor, ToolContext
+from app.services.tool_executors.base import BaseToolExecutor, ToolContext, str_arg
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class ToolResponseFetchExecutor(BaseToolExecutor):
 
     async def execute(self, args: dict, config: dict, ctx: ToolContext) -> str:
-        tool_response_id = args.get("tool_response_id", "").strip()
+        tool_response_id = str_arg(args, "tool_response_id")
         if not tool_response_id:
             return "Error: tool_response_id is required."
 

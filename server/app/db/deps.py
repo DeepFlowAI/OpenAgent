@@ -6,11 +6,11 @@ from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.redis import redis_client
-from app.db.session import AsyncSessionLocal
+from app.db.session import session_scope
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with AsyncSessionLocal() as session:
+    async with session_scope() as session:
         yield session
 
 

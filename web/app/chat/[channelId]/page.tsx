@@ -34,6 +34,7 @@ import { WelcomeEmbedFrame } from '@/app/components/features/welcome-embed-frame
 import {
   DEFAULT_CONVERSATION_SETTINGS,
   type ConversationSettingsConfig,
+  type FAQCategoryConfig,
   type WelcomeMessageBlock,
 } from '@/models/agent'
 import type { PublicChannel } from '@/models/channel'
@@ -64,6 +65,7 @@ import {
   IconThumbUpFilled,
   IconThumbDown,
   IconThumbDownFilled,
+  IconChevronRight,
 } from '@tabler/icons-react'
 
 // ─── Types ────────────────────────────────────────────────
@@ -2000,12 +2002,41 @@ function ChatThreadView({
     return welcome.blocks.filter(isValidWelcomeBlock)
   }, [conversationSettings])
   const showWelcomeMessage = visibleWelcomeBlocks.length > 0
+  const visibleFAQ = useMemo(() => {
+    const faq = conversationSettings.faq
+    const title = faq.title.trim()
+    if (!faq.enabled || !title) {
+      return { title: '', categories: [] as FAQCategoryConfig[] }
+    }
+    const categories = faq.categories
+      .map((category) => ({
+        name: category.name.trim(),
+        questions: category.questions
+          .map((question) => ({ text: question.text.trim() }))
+          .filter((question) => question.text.length > 0),
+      }))
+      .filter((category) => category.name && category.questions.length > 0)
+    return { title, categories }
+  }, [conversationSettings])
+  const showFAQ = visibleFAQ.categories.length > 0
   const visibleAIDisclaimer = useMemo(() => {
     const disclaimer = conversationSettings.ai_disclaimer
     const content = disclaimer.content.trim()
     if (!disclaimer.enabled || !content) return ''
     return content
   }, [conversationSettings])
+  const sendFAQQuestion = useCallback((text: string) => {
+    void onNew({
+      role: 'user',
+      content: [{ type: 'text', text }],
+      attachments: [],
+      metadata: { custom: {} },
+      createdAt: new Date(),
+      parentId: null,
+      sourceId: null,
+      runConfig: undefined,
+    })
+  }, [onNew])
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -2022,20 +2053,35 @@ function ChatThreadView({
         >
             {/* ── Empty state: welcome message or centered logo + title ── */}
             <AuiIf condition={(s) => s.thread.isEmpty}>
-              {showWelcomeMessage ? (
+              {showWelcomeMessage || showFAQ ? (
                 <>
                   <div className={cn(
                     'w-full shrink-0',
                     isEmbed ? 'px-4 pb-5 pt-4' : 'px-4 pb-6 pt-6 md:px-0',
                   )}>
                     <div className={cn('mx-auto w-full', isEmbed ? '' : 'max-w-[740px]')}>
-                      <ChatWelcomeMessage
-                        blocks={visibleWelcomeBlocks}
-                        appearance={appearance}
-                        isEmbed={isEmbed}
-                        defaultRadius={defaultAgentRadius}
-                        samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
-                      />
+                      <div className="flex flex-col gap-3">
+                        {showWelcomeMessage ? (
+                          <ChatWelcomeMessage
+                            blocks={visibleWelcomeBlocks}
+                            appearance={appearance}
+                            isEmbed={isEmbed}
+                            defaultRadius={defaultAgentRadius}
+                            samePageNavigationUrlAllowlist={samePageNavigationUrlAllowlist}
+                          />
+                        ) : null}
+                        {showFAQ ? (
+                          <ChatFAQGuidance
+                            title={visibleFAQ.title}
+                            categories={visibleFAQ.categories}
+                            appearance={appearance}
+                            isEmbed={isEmbed}
+                            defaultRadius={defaultAgentRadius}
+                            disabled={isStreaming}
+                            onQuestionClick={sendFAQQuestion}
+                          />
+                        ) : null}
+                      </div>
                     </div>
                   </div>
                   <div className="min-h-6 grow" />
@@ -2315,6 +2361,106 @@ function ChatWelcomeMessage({
             )}
           </div>
         </div>
+      </div>
+    </div>
+  )
+}
+
+function ChatFAQGuidance({
+  title,
+  categories,
+  appearance,
+  isEmbed,
+  defaultRadius,
+  disabled,
+  onQuestionClick,
+}: {
+  title: string
+  categories: FAQCategoryConfig[]
+  appearance: AppearanceCfg
+  isEmbed: boolean
+  defaultRadius: string
+  disabled: boolean
+  onQuestionClick: (text: string) => void
+}) {
+  const [activeIndex, setActiveIndex] = useState(0)
+
+  useEffect(() => {
+    setActiveIndex((index) => Math.min(index, Math.max(categories.length - 1, 0)))
+  }, [categories.length])
+
+  const activeCategory = categories[activeIndex] ?? categories[0]
+  if (!activeCategory) return null
+
+  const bubbleBgColor = appearance.agentBubbleBgColor || (isEmbed ? '#FFFFFF' : '#F5F5F5')
+  const borderColor = appearance.agentBubbleBorderColor || '#E5E5E5'
+  const textColor = appearance.agentBubbleTextColor || (isEmbed ? '#3F3F46' : '#1A1A1A')
+  const typeButtonBgColor = appearance.sendMessageButtonBgColor || '#1A1A1A'
+  const typeButtonTextColor = appearance.sendMessageButtonIconColor || '#FFFFFF'
+
+  return (
+    <div
+      className="w-fit max-w-full min-w-0 self-start break-words border p-3"
+      style={{
+        backgroundColor: bubbleBgColor,
+        borderColor,
+        borderRadius: parseRadius(appearance.agentBubbleRadius, defaultRadius),
+      }}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <h3
+          className={cn(
+            'min-w-0 truncate font-semibold',
+            isEmbed ? 'text-[13px]' : 'text-sm',
+          )}
+          style={{ color: textColor }}
+        >
+          {title}
+        </h3>
+      </div>
+
+      <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+        {categories.map((category, index) => {
+          const active = index === activeIndex
+          return (
+            <button
+              key={`${category.name}-${index}`}
+              type="button"
+              className={cn(
+                'shrink-0 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors',
+                !active && 'hover:bg-[#F7F7F7]',
+              )}
+              style={{
+                borderColor: typeButtonBgColor,
+                backgroundColor: active ? typeButtonBgColor : '#FFFFFF',
+                color: active ? typeButtonTextColor : textColor,
+              }}
+              onClick={() => setActiveIndex(index)}
+            >
+              {category.name}
+            </button>
+          )
+        })}
+      </div>
+
+      <div className="mt-3 space-y-2">
+        {activeCategory.questions.map((question, index) => (
+          <button
+            key={`${activeCategory.name}-${index}-${question.text}`}
+            type="button"
+            disabled={disabled}
+            onClick={() => onQuestionClick(question.text)}
+            className={cn(
+              'flex w-full items-center justify-between gap-3 rounded-lg bg-transparent px-2 py-2 text-left transition-opacity hover:opacity-75 disabled:cursor-not-allowed disabled:opacity-60',
+              isEmbed ? 'text-[13px]' : 'text-sm',
+            )}
+          >
+            <span className="min-w-0 flex-1 break-words" style={{ color: textColor }}>
+              {question.text}
+            </span>
+            <IconChevronRight size={16} className="shrink-0 opacity-45" style={{ color: textColor }} />
+          </button>
+        ))}
       </div>
     </div>
   )

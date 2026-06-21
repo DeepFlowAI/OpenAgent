@@ -2,6 +2,7 @@ import {
   DEFAULT_CONVERSATION_SETTINGS,
   type AIDisclaimerConfig,
   type ConversationSettingsConfig,
+  type FAQCategoryConfig,
   type ToolCallLimitReplyConfig,
   type WelcomeMessageBlock,
 } from '@/models/agent'
@@ -11,6 +12,11 @@ function createDefaultConversationSettings(): ConversationSettingsConfig {
     welcome_message: {
       enabled: DEFAULT_CONVERSATION_SETTINGS.welcome_message.enabled,
       blocks: [],
+    },
+    faq: {
+      enabled: DEFAULT_CONVERSATION_SETTINGS.faq.enabled,
+      title: DEFAULT_CONVERSATION_SETTINGS.faq.title,
+      categories: [],
     },
     ai_disclaimer: {
       enabled: DEFAULT_CONVERSATION_SETTINGS.ai_disclaimer.enabled,
@@ -48,6 +54,28 @@ export function normalizeWelcomeMessageBlock(
   return null
 }
 
+function normalizeFAQCategory(category: unknown): FAQCategoryConfig | null {
+  if (!category || typeof category !== 'object') return null
+  const record = category as Record<string, unknown>
+  const rawQuestions = record.questions
+  const questions = Array.isArray(rawQuestions)
+    ? rawQuestions
+        .map((question) => {
+          if (!question || typeof question !== 'object') return null
+          const questionRecord = question as Record<string, unknown>
+          return {
+            text: typeof questionRecord.text === 'string' ? questionRecord.text : '',
+          }
+        })
+        .filter((question): question is { text: string } => Boolean(question))
+    : []
+
+  return {
+    name: typeof record.name === 'string' ? record.name : '',
+    questions,
+  }
+}
+
 export function normalizeConversationSettings(
   input: unknown,
 ): ConversationSettingsConfig {
@@ -55,6 +83,7 @@ export function normalizeConversationSettings(
   if (!input || typeof input !== 'object') return defaults
   const record = input as Record<string, unknown>
   const welcome = record.welcome_message
+  const faq = record.faq
   const aiDisclaimer = record.ai_disclaimer
   const toolCallLimitReply = record.tool_call_limit_reply
 
@@ -67,6 +96,16 @@ export function normalizeConversationSettings(
     ? rawBlocks
         .map(normalizeWelcomeMessageBlock)
         .filter((block): block is WelcomeMessageBlock => Boolean(block))
+    : []
+  const faqRecord =
+    faq && typeof faq === 'object'
+      ? (faq as Record<string, unknown>)
+      : null
+  const rawFAQCategories = faqRecord?.categories
+  const faqCategories = Array.isArray(rawFAQCategories)
+    ? rawFAQCategories
+        .map(normalizeFAQCategory)
+        .filter((category): category is FAQCategoryConfig => Boolean(category))
     : []
   const disclaimerRecord =
     aiDisclaimer && typeof aiDisclaimer === 'object'
@@ -98,6 +137,14 @@ export function normalizeConversationSettings(
     welcome_message: {
       enabled: Boolean(welcomeRecord?.enabled),
       blocks,
+    },
+    faq: {
+      enabled: Boolean(faqRecord?.enabled),
+      title:
+        typeof faqRecord?.title === 'string'
+          ? faqRecord.title
+          : defaults.faq.title,
+      categories: faqCategories,
     },
     ai_disclaimer: disclaimer,
     tool_call_limit_reply: toolLimitReply,

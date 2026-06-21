@@ -24,7 +24,7 @@ import type { EngineConfig } from '@/models/agent'
 import { DEFAULT_ENGINE_CONFIG } from '@/models/agent'
 
 const FALLBACK_LLM_MODELS = [
-  { value: 'gpt-4o', label: 'GPT-4o' },
+  { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
 ] as const
 
 type BasicEngineConfig = Pick<
@@ -498,7 +498,7 @@ export default function BasicSettingsPage() {
                   updateContext('recent_full_tool_responses', parseInt(e.target.value) || 1)
                 }
                 min={1}
-                max={5}
+                max={10}
                 className="w-full rounded-lg border border-[#E4E4E7] px-3 py-2 text-sm text-[#18181B] outline-none focus:border-[#18181B]"
               />
             </div>

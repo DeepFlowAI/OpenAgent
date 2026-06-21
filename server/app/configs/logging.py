@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import sys
@@ -38,6 +39,33 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(entry, ensure_ascii=False)
 
 
+class DowngradeCancelledPoolErrorsFilter(logging.Filter):
+    """Downgrade SQLAlchemy connection-pool ERRORs caused by request
+    cancellation (client disconnect) to WARNING.
+
+    When an ASGI request task is cancelled mid-flight (client closed the
+    connection, gateway timeout, …) the cancellation propagates into the async
+    DB session teardown, and SQLAlchemy logs ``Exception terminating
+    connection ...`` at ERROR with a CancelledError. The connection is simply
+    discarded and recreated — benign noise — but it trips the
+    ERROR/FATAL/CRITICAL log alert. Record it as WARNING so the alert stays
+    quiet while real pool errors (connection refused, network drops) still
+    surface at ERROR.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.ERROR and record.name.startswith(
+            "sqlalchemy.pool"
+        ):
+            exc = record.exc_info[1] if record.exc_info else None
+            if isinstance(exc, asyncio.CancelledError) or (
+                exc is not None and "cancel scope" in str(exc)
+            ):
+                record.levelno = logging.WARNING
+                record.levelname = "WARNING"
+        return True
+
+
 def setup_logging() -> None:
     level = logging.DEBUG if settings.DEBUG else logging.INFO
 
@@ -47,9 +75,12 @@ def setup_logging() -> None:
     if root.handlers:
         root.handlers.clear()
 
+    downgrade_filter = DowngradeCancelledPoolErrorsFilter()
+
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(level)
     handler.addFilter(TraceFilter())
+    handler.addFilter(downgrade_filter)
 
     if settings.LOG_FORMAT == "json":
         handler.setFormatter(JsonFormatter())
@@ -65,6 +96,7 @@ def setup_logging() -> None:
     if otel_handler is not None:
         otel_handler.setLevel(level)
         otel_handler.addFilter(TraceFilter())
+        otel_handler.addFilter(downgrade_filter)
         root.addHandler(otel_handler)
 
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)

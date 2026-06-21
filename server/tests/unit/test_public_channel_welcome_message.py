@@ -54,6 +54,18 @@ class TestPublicChannelWelcomeMessage:
                             "enabled": True,
                             "content": "AI 内容仅供参考。",
                         },
+                        "faq": {
+                            "enabled": True,
+                            "title": "热点问题",
+                            "categories": [
+                                {
+                                    "name": "明星爆款",
+                                    "questions": [
+                                        {"text": "哪款奶瓶更适合我家宝宝呢？"}
+                                    ],
+                                }
+                            ],
+                        },
                         "tool_call_limit_reply": {
                             "enabled": True,
                             "content": "**工具调用已达上限**\n\n请缩小范围后重试。",
@@ -86,6 +98,19 @@ class TestPublicChannelWelcomeMessage:
             "enabled": True,
             "content": "AI 内容仅供参考。",
         }
+        faq = data["conversation_settings"]["faq"]
+        assert faq == {
+            "enabled": True,
+            "title": "热点问题",
+            "categories": [
+                {
+                    "name": "明星爆款",
+                    "questions": [
+                        {"text": "哪款奶瓶更适合我家宝宝呢？"}
+                    ],
+                }
+            ],
+        }
         tool_limit_reply = data["conversation_settings"]["tool_call_limit_reply"]
         assert tool_limit_reply == {
             "enabled": True,
@@ -113,6 +138,9 @@ class TestPublicChannelWelcomeMessage:
             response.conversation_settings.ai_disclaimer.content
             == "本内容由AI生成，仅供参考"
         )
+        assert response.conversation_settings.faq.enabled is False
+        assert response.conversation_settings.faq.title == "常见问题"
+        assert response.conversation_settings.faq.categories == []
         assert response.conversation_settings.tool_call_limit_reply.enabled is True
         assert (
             response.conversation_settings.tool_call_limit_reply.content

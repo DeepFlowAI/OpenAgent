@@ -4,17 +4,13 @@ from app.libs.llm.providers import litellm_client
 
 def test_parse_llm_ui_models_default_catalog():
     models = parse_llm_ui_models("")
-    assert len(models) >= 10
-    assert models[0].value == "gpt-4o"
-    assert ("deepseek-v4-pro", "DeepSeek V4 Pro") in [
-        (m.value, m.label) for m in models
-    ]
-    assert ("deepseek-v4-pro-official", "DeepSeek V4 Pro 官方") in [
-        (m.value, m.label) for m in models
-    ]
-    assert ("deepseek-v4-flash", "deepseek v4 flash 官方") in [
-        (m.value, m.label) for m in models
-    ]
+    assert len(models) >= 6
+    model_items = [(m.value, m.label) for m in models]
+    assert models[0].value == "deepseek-v4-pro"
+    assert ("gpt-4o", "GPT-4o") not in model_items
+    assert ("deepseek-v4-pro", "DeepSeek V4 Pro") in model_items
+    assert ("deepseek-v4-pro-official", "DeepSeek V4 Pro 官方") not in model_items
+    assert ("deepseek-v4-flash", "DeepSeek V4 Flash") in model_items
 
 
 def test_parse_llm_ui_models_custom_entries():
@@ -97,7 +93,7 @@ def test_model_candidates_deepseek_uses_official_when_bailian_unavailable(monkey
     assert candidates[0]["api_base"] == "https://api.deepseek.com"
 
 
-def test_model_candidates_deepseek_prefers_bailian_when_available(monkeypatch):
+def test_model_candidates_deepseek_prefers_official_when_bailian_available(monkeypatch):
     monkeypatch.setattr(litellm_client.settings, "LLM_PROVIDER_CHANNELS", "")
     monkeypatch.setattr(litellm_client.settings, "ALIYUN_BAILIAN_API_KEY", "bailian-key")
     monkeypatch.setattr(
@@ -116,19 +112,22 @@ def test_model_candidates_deepseek_prefers_bailian_when_available(monkeypatch):
     candidates = litellm_client._model_candidates("deepseek-v4-pro")
 
     assert [c["channel"] for c in candidates] == [
-        "aliyun-bailian",
         "deepseek-official",
+        "aliyun-bailian",
         "openrouter",
     ]
     assert candidates[0]["model"] == "openai/deepseek-v4-pro"
-    assert candidates[0]["api_key"] == "bailian-key"
+    assert candidates[0]["api_key"] == "deepseek-key"
+    assert candidates[0]["api_base"] == "https://api.deepseek.com"
+    assert candidates[1]["model"] == "openai/deepseek-v4-pro"
+    assert candidates[1]["api_key"] == "bailian-key"
     assert (
-        candidates[0]["api_base"]
+        candidates[1]["api_base"]
         == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     )
 
 
-def test_model_candidates_deepseek_official_option_skips_bailian(monkeypatch):
+def test_model_candidates_legacy_deepseek_official_alias_uses_merged_route(monkeypatch):
     monkeypatch.setattr(litellm_client.settings, "LLM_PROVIDER_CHANNELS", "")
     monkeypatch.setattr(litellm_client.settings, "ALIYUN_BAILIAN_API_KEY", "bailian-key")
     monkeypatch.setattr(
@@ -146,8 +145,13 @@ def test_model_candidates_deepseek_official_option_skips_bailian(monkeypatch):
 
     candidates = litellm_client._model_candidates("deepseek-v4-pro-official")
 
-    assert [c["channel"] for c in candidates] == ["deepseek-official", "openrouter"]
+    assert [c["channel"] for c in candidates] == [
+        "deepseek-official",
+        "aliyun-bailian",
+        "openrouter",
+    ]
     assert [c["model"] for c in candidates] == [
+        "openai/deepseek-v4-pro",
         "openai/deepseek-v4-pro",
         "openrouter/deepseek/deepseek-v4-pro",
     ]
@@ -155,7 +159,7 @@ def test_model_candidates_deepseek_official_option_skips_bailian(monkeypatch):
     assert candidates[0]["api_base"] == "https://api.deepseek.com"
 
 
-def test_model_candidates_deepseek_official_option_not_mapped_to_bailian(monkeypatch):
+def test_model_candidates_legacy_deepseek_official_alias_respects_channel_filter(monkeypatch):
     monkeypatch.setattr(
         litellm_client.settings,
         "LLM_PROVIDER_CHANNELS",
@@ -166,11 +170,14 @@ def test_model_candidates_deepseek_official_option_not_mapped_to_bailian(monkeyp
 
     candidates = litellm_client._model_candidates("deepseek-v4-pro-official")
 
-    assert [c["channel"] for c in candidates] == ["openrouter"]
-    assert candidates[0]["model"] == "openrouter/deepseek/deepseek-v4-pro"
+    assert [c["channel"] for c in candidates] == ["aliyun-bailian", "openrouter"]
+    assert [c["model"] for c in candidates] == [
+        "openai/deepseek-v4-pro",
+        "openrouter/deepseek/deepseek-v4-pro",
+    ]
 
 
-def test_model_candidates_deepseek_flash_uses_official(monkeypatch):
+def test_model_candidates_deepseek_flash_prefers_official_when_bailian_available(monkeypatch):
     monkeypatch.setattr(litellm_client.settings, "LLM_PROVIDER_CHANNELS", "")
     monkeypatch.setattr(litellm_client.settings, "ALIYUN_BAILIAN_API_KEY", "bailian-key")
     monkeypatch.setattr(litellm_client.settings, "DEEPSEEK_API_KEY", "deepseek-key")
@@ -183,8 +190,13 @@ def test_model_candidates_deepseek_flash_uses_official(monkeypatch):
 
     candidates = litellm_client._model_candidates("deepseek-v4-flash")
 
-    assert [c["channel"] for c in candidates] == ["deepseek-official", "openrouter"]
+    assert [c["channel"] for c in candidates] == [
+        "deepseek-official",
+        "aliyun-bailian",
+        "openrouter",
+    ]
     assert [c["model"] for c in candidates] == [
+        "openai/deepseek-v4-flash",
         "openai/deepseek-v4-flash",
         "openrouter/deepseek/deepseek-v4-flash",
     ]
@@ -192,7 +204,7 @@ def test_model_candidates_deepseek_flash_uses_official(monkeypatch):
     assert candidates[0]["api_base"] == "https://api.deepseek.com"
 
 
-def test_model_candidates_deepseek_flash_not_mapped_to_bailian(monkeypatch):
+def test_model_candidates_deepseek_flash_respects_channel_filter(monkeypatch):
     monkeypatch.setattr(
         litellm_client.settings,
         "LLM_PROVIDER_CHANNELS",
@@ -203,8 +215,11 @@ def test_model_candidates_deepseek_flash_not_mapped_to_bailian(monkeypatch):
 
     candidates = litellm_client._model_candidates("deepseek-v4-flash")
 
-    assert [c["channel"] for c in candidates] == ["openrouter"]
-    assert candidates[0]["model"] == "openrouter/deepseek/deepseek-v4-flash"
+    assert [c["channel"] for c in candidates] == ["aliyun-bailian", "openrouter"]
+    assert [c["model"] for c in candidates] == [
+        "openai/deepseek-v4-flash",
+        "openrouter/deepseek/deepseek-v4-flash",
+    ]
 
 
 def test_deepseek_thinking_request_params_preserve_reasoning_content():

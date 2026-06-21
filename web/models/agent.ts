@@ -51,6 +51,21 @@ export type AIDisclaimerConfig = {
   content: string
 }
 
+export type FAQQuestionConfig = {
+  text: string
+}
+
+export type FAQCategoryConfig = {
+  name: string
+  questions: FAQQuestionConfig[]
+}
+
+export type FAQConfig = {
+  enabled: boolean
+  title: string
+  categories: FAQCategoryConfig[]
+}
+
 export type ToolCallLimitReplyConfig = {
   enabled: boolean
   /** Markdown source rendered when a turn reaches the tool-call limit. */
@@ -59,6 +74,7 @@ export type ToolCallLimitReplyConfig = {
 
 export type ConversationSettingsConfig = {
   welcome_message: WelcomeMessageConfig
+  faq: FAQConfig
   ai_disclaimer: AIDisclaimerConfig
   tool_call_limit_reply: ToolCallLimitReplyConfig
 }
@@ -80,6 +96,11 @@ export const DEFAULT_CONVERSATION_SETTINGS: ConversationSettingsConfig = {
   welcome_message: {
     enabled: false,
     blocks: [],
+  },
+  faq: {
+    enabled: false,
+    title: '常见问题',
+    categories: [],
   },
   ai_disclaimer: {
     enabled: false,

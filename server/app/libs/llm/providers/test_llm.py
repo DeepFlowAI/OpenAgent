@@ -6,7 +6,7 @@ Usage:
     python -m app.libs.llm.providers.test_llm              # uses .env.dev
     python -m app.libs.llm.providers.test_llm --stream      # streaming mode
     python -m app.libs.llm.providers.test_llm --env .env.production  # specify env
-    python -m app.libs.llm.providers.test_llm --model kimi-k2.5
+    python -m app.libs.llm.providers.test_llm --model kimi-k2.6
     python -m app.libs.llm.providers.test_llm --model glm-5.1 --thinking
 
     # Override via env vars:
@@ -158,8 +158,8 @@ def main() -> None:
     parser.add_argument("--env", default=".env.dev", help="Env file to load (default: .env.dev)")
     parser.add_argument(
         "--model",
-        default="gpt-4o",
-        help="Model short name (gpt-4o, kimi-k2.5, kimi-k2.6, glm-5, glm-5.1, ling-2.6-flash, mimo-v2.5-pro, minimax-m2.5, minimax-m2.7, step-3.5-flash, grok-4.20, grok-4.20-multi-agent)",
+        default="deepseek-v4-pro",
+        help="Model short name (deepseek-v4-pro, deepseek-v4-flash, kimi-k2.6, glm-5.1, mimo-v2.5-pro, minimax-m2.7)",
     )
     parser.add_argument("--prompt", default="你好，请用一句话介绍你自己。", help="Test prompt")
     parser.add_argument(
@@ -213,7 +213,7 @@ if __name__ == "__main__":
 
 
 """
-# 普通对话测试（默认读 .env.dev，模型 gpt-4o）
+# 普通对话测试（默认读 .env.dev，模型 deepseek-v4-pro）
 python -m app.libs.llm.providers.test_llm
 
 # 流式输出测试
@@ -226,20 +226,16 @@ python -m app.libs.llm.providers.test_llm --tool
 python -m app.libs.llm.providers.test_llm --all
 
 # 指定模型
-python -m app.libs.llm.providers.test_llm --model kimi-k2.5
-python -m app.libs.llm.providers.test_llm --model glm-5 --stream
+python -m app.libs.llm.providers.test_llm --model kimi-k2.6
 python -m app.libs.llm.providers.test_llm --model glm-5.1 --thinking --stream
-python -m app.libs.llm.providers.test_llm --model ling-2.6-flash
 python -m app.libs.llm.providers.test_llm --model mimo-v2.5-pro
-python -m app.libs.llm.providers.test_llm --model minimax-m2.5
 python -m app.libs.llm.providers.test_llm --model minimax-m2.7 --prompt "解释量子计算"
 python -m app.libs.llm.providers.test_llm --model minimax-m2.7 --thinking
-python -m app.libs.llm.providers.test_llm --model step-3.5-flash
 
 # 使用生产环境配置
 python -m app.libs.llm.providers.test_llm --env .env.production
 
 # 临时覆盖 API 配置
 OPENROUTER_API_KEY=sk-or-xxx \
-python -m app.libs.llm.providers.test_llm --model gpt-4o
+python -m app.libs.llm.providers.test_llm --model deepseek-v4-pro
 """

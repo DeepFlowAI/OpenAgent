@@ -10,7 +10,7 @@ from app.schemas.search import (
     RerankerConfig, PaginationConfig, BM25Config, VectorConfig,
 )
 from app.services.search_service import SearchService
-from app.services.tool_executors.base import BaseToolExecutor, ToolContext
+from app.services.tool_executors.base import BaseToolExecutor, ToolContext, str_arg
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ class SearchToolExecutor(BaseToolExecutor):
         if not kb_id:
             return "<search_results>\nError: knowledge_base_id not configured for this tool.\n</search_results>"
 
-        query = args.get("query", "").strip()
+        query = str_arg(args, "query")
         if not query:
             return "<search_results>\nError: query is required.\n</search_results>"
 
@@ -196,6 +196,13 @@ def _merge_filters(
     llm_filter: dict,
 ) -> SearchFilter | None:
     """Merge fixed_filters (from tool config) with LLM-provided filter using AND."""
+    # The model sometimes emits ``filter`` as a bare string (or list) instead of
+    # the expected object; ignore anything that isn't a dict so a malformed
+    # filter degrades to "no LLM filter" instead of crashing the search tool
+    # with "'str' object has no attribute 'get'".
+    if not isinstance(llm_filter, dict):
+        llm_filter = {}
+
     doc_meta_conds: list[FilterNode] = []
     slice_meta_conds: list[FilterNode] = []
     doc_ids: list[str] | None = None

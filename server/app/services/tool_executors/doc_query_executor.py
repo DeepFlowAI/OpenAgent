@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import Document
 from app.schemas.search import FilterCondition
-from app.services.tool_executors.base import BaseToolExecutor, ToolContext
+from app.services.tool_executors.base import BaseToolExecutor, ToolContext, dict_arg, str_arg
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +23,8 @@ class DocQueryToolExecutor(BaseToolExecutor):
         if not kb_id:
             return "<document_results>\nError: knowledge_base_id not configured for this tool.\n</document_results>"
 
-        query = args.get("query", "").strip()
-        llm_filter = args.get("filter", {})
+        query = str_arg(args, "query")
+        llm_filter = dict_arg(args, "filter")
         fixed_filters = config.get("fixed_filters", [])
 
         if not query and not llm_filter:
@@ -68,10 +68,20 @@ async def _query_documents(
             )
 
     if llm_filter:
-        if llm_filter.get("doc_ids"):
-            doc_ids = [int(d) for d in llm_filter["doc_ids"]]
-            stmt = stmt.where(Document.id.in_(doc_ids))
-        for cond in llm_filter.get("doc_meta", []):
+        raw_doc_ids = llm_filter.get("doc_ids")
+        if isinstance(raw_doc_ids, list):
+            doc_ids = []
+            for d in raw_doc_ids:
+                try:
+                    doc_ids.append(int(d))
+                except (TypeError, ValueError):
+                    continue
+            if doc_ids:
+                stmt = stmt.where(Document.id.in_(doc_ids))
+        doc_meta_conds = llm_filter.get("doc_meta")
+        for cond in doc_meta_conds if isinstance(doc_meta_conds, list) else []:
+            if not isinstance(cond, dict) or not {"field", "op", "value"} <= cond.keys():
+                continue
             field, op, value = cond["field"], cond["op"], cond["value"]
             if op in ("eq", "equals", "="):
                 stmt = stmt.where(Document.doc_meta[field].astext == str(value))

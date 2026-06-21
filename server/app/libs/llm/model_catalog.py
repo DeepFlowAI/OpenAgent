@@ -13,21 +13,12 @@ class UiModelOption:
 
 # Default catalog when LLM_UI_MODELS is unset (matches legacy frontend list).
 DEFAULT_UI_MODELS: tuple[UiModelOption, ...] = (
-    UiModelOption("gpt-4o", "GPT-4o"),
     UiModelOption("deepseek-v4-pro", "DeepSeek V4 Pro"),
-    UiModelOption("deepseek-v4-pro-official", "DeepSeek V4 Pro 官方"),
-    UiModelOption("deepseek-v4-flash", "deepseek v4 flash 官方"),
-    UiModelOption("kimi-k2.5", "Kimi K2.5"),
+    UiModelOption("deepseek-v4-flash", "DeepSeek V4 Flash"),
     UiModelOption("kimi-k2.6", "Kimi K2.6"),
-    UiModelOption("glm-5", "GLM-5"),
     UiModelOption("glm-5.1", "GLM-5.1"),
-    UiModelOption("ling-2.6-flash", "Ling 2.6 Flash"),
     UiModelOption("mimo-v2.5-pro", "MiMo V2.5 Pro"),
-    UiModelOption("minimax-m2.5", "MiniMax M2.5"),
     UiModelOption("minimax-m2.7", "MiniMax M2.7"),
-    UiModelOption("step-3.5-flash", "Step 3.5 Flash"),
-    UiModelOption("grok-4.20", "Grok 4.20"),
-    UiModelOption("grok-4.20-multi-agent", "Grok 4.20 (Multi-Agent)"),
 )
 
 _DEFAULT_LABELS = {m.value: m.label for m in DEFAULT_UI_MODELS}

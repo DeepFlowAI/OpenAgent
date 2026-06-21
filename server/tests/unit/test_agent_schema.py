@@ -51,7 +51,7 @@ class TestModelConfigThinkingMigration:
     def test_engine_config_merge_with_legacy_data(self):
         raw = {
             "model": {
-                "model_name": "gpt-4o",
+                "model_name": "deepseek-v4-pro",
                 "thinking_mode": True,
                 "temperature": 0.5,
             }
@@ -64,7 +64,7 @@ class TestModelConfigThinkingMigration:
     def test_engine_config_merge_with_new_data(self):
         raw = {
             "model": {
-                "model_name": "gpt-4o",
+                "model_name": "deepseek-v4-pro",
                 "first_round_thinking": False,
                 "subsequent_rounds_thinking": True,
             }
@@ -74,7 +74,7 @@ class TestModelConfigThinkingMigration:
         assert config.model.subsequent_rounds_thinking is True
 
     def test_no_thinking_fields_at_all_defaults(self):
-        raw = {"model": {"model_name": "kimi-k2.5"}}
+        raw = {"model": {"model_name": "kimi-k2.6"}}
         config = EngineConfig(**{**EngineConfig().model_dump(), **raw})
         assert config.model.first_round_thinking is False
         assert config.model.subsequent_rounds_thinking is False
@@ -100,6 +100,15 @@ class TestContextConfig:
         with pytest.raises(ValidationError):
             ContextConfig(max_tool_loop_rounds=101)
 
+    def test_recent_full_tool_responses_accepts_10(self):
+        config = ContextConfig(recent_full_tool_responses=10)
+
+        assert config.recent_full_tool_responses == 10
+
+    def test_recent_full_tool_responses_caps_at_10(self):
+        with pytest.raises(ValidationError):
+            ContextConfig(recent_full_tool_responses=11)
+
 
 class TestConversationSettingsConfig:
 
@@ -112,6 +121,10 @@ class TestConversationSettingsConfig:
         disclaimer = config.conversation_settings.ai_disclaimer
         assert disclaimer.enabled is False
         assert disclaimer.content == "本内容由AI生成，仅供参考"
+        faq = config.conversation_settings.faq
+        assert faq.enabled is False
+        assert faq.title == "常见问题"
+        assert faq.categories == []
         tool_limit_reply = config.conversation_settings.tool_call_limit_reply
         assert tool_limit_reply.enabled is True
         assert tool_limit_reply.content == DEFAULT_TOOL_CALL_LIMIT_REPLY
@@ -187,6 +200,90 @@ class TestConversationSettingsConfig:
                     "ai_disclaimer": {
                         "enabled": True,
                         "content": "a" * 201,
+                    }
+                }
+            )
+
+    def test_faq_accepts_draft_categories_and_questions(self):
+        config = EngineConfig(
+            conversation_settings={
+                "faq": {
+                    "enabled": True,
+                    "title": "热点问题",
+                    "categories": [
+                        {
+                            "name": "明星爆款",
+                            "questions": [
+                                {"text": "哪款奶瓶更适合我家宝宝呢？"},
+                                {"text": ""},
+                            ],
+                        },
+                        {"name": "", "questions": []},
+                    ],
+                }
+            }
+        )
+
+        faq = config.conversation_settings.faq
+        assert faq.enabled is True
+        assert faq.title == "热点问题"
+        assert faq.categories[0].name == "明星爆款"
+        assert faq.categories[0].questions[0].text == "哪款奶瓶更适合我家宝宝呢？"
+
+    def test_faq_requires_title_when_enabled(self):
+        with pytest.raises(ValidationError):
+            EngineConfig(
+                conversation_settings={
+                    "faq": {
+                        "enabled": True,
+                        "title": "   ",
+                        "categories": [],
+                    }
+                }
+            )
+
+    def test_faq_title_has_max_length(self):
+        with pytest.raises(ValidationError):
+            EngineConfig(
+                conversation_settings={
+                    "faq": {
+                        "enabled": True,
+                        "title": "a" * 21,
+                        "categories": [],
+                    }
+                }
+            )
+
+    def test_faq_category_name_has_max_length(self):
+        with pytest.raises(ValidationError):
+            EngineConfig(
+                conversation_settings={
+                    "faq": {
+                        "enabled": True,
+                        "title": "常见问题",
+                        "categories": [
+                            {
+                                "name": "a" * 21,
+                                "questions": [],
+                            }
+                        ],
+                    }
+                }
+            )
+
+    def test_faq_question_text_has_max_length(self):
+        with pytest.raises(ValidationError):
+            EngineConfig(
+                conversation_settings={
+                    "faq": {
+                        "enabled": True,
+                        "title": "常见问题",
+                        "categories": [
+                            {
+                                "name": "分类",
+                                "questions": [{"text": "a" * 101}],
+                            }
+                        ],
                     }
                 }
             )
@@ -282,6 +379,11 @@ class TestEngineConfigUpdate:
                     "enabled": False,
                     "blocks": [],
                 },
+                "faq": {
+                    "enabled": True,
+                    "title": "热点问题",
+                    "categories": [],
+                },
                 "ai_disclaimer": {
                     "enabled": True,
                     "content": "AI 内容仅供参考。",
@@ -295,7 +397,19 @@ class TestEngineConfigUpdate:
 
         assert update.conversation_settings is not None
         assert update.conversation_settings.welcome_message.blocks == []
+        assert update.conversation_settings.faq.title == "热点问题"
         assert (
             update.conversation_settings.tool_call_limit_reply.content
             == "**工具调用已达上限**"
         )
+
+    def test_conversation_settings_update_requires_complete_faq_section(self):
+        with pytest.raises(ValidationError):
+            EngineConfigUpdate(
+                conversation_settings={
+                    "faq": {
+                        "enabled": True,
+                        "title": "热点问题",
+                    }
+                }
+            )

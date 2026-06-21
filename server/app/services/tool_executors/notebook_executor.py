@@ -33,7 +33,7 @@ class NotebookEntry:
 class NotebookToolExecutor(BaseToolExecutor):
 
     async def execute(self, args: dict, config: dict, ctx: ToolContext) -> str:
-        action = args.get("action", "").lower()
+        action = str(args.get("action", "")).lower()
         items = args.get("items", [])
 
         if action not in ("add", "remove"):

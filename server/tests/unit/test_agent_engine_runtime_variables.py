@@ -115,6 +115,43 @@ async def test_build_history_counts_only_rounds_with_actual_tool_trace(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_build_history_replays_reasoning_content_for_assistant_message(monkeypatch):
+    """Thinking models require the prior turn's reasoning_content to be passed
+    back. The final assistant_message step stores only content, so it must
+    recover thinking_content from its parent llm_call step.
+    """
+    async def fake_get_history_steps(db, conversation_id):
+        return [
+            _step(1, 1, "user_message", content="u1"),
+            _step(1, 2, "llm_call", id=10, thinking_content="think1"),
+            _step(1, 3, "assistant_message", content="a1", parent_step_id=10),
+        ]
+
+    monkeypatch.setattr(
+        svc.ConversationStepRepository,
+        "get_history_steps",
+        fake_get_history_steps,
+    )
+
+    history = await svc._build_history(
+        db=None,
+        conversation_id=1,
+        config=EngineConfig(
+            context={
+                "max_rounds": 0,
+                "history_tool_rounds": 1,
+                "recent_full_tool_responses": 4,
+            }
+        ),
+        current_round=2,
+    )
+
+    assert [message["role"] for message in history] == ["user", "assistant"]
+    assert history[1]["content"] == "a1"
+    assert history[1]["reasoning_content"] == "think1"
+
+
+@pytest.mark.asyncio
 async def test_build_history_applies_recent_full_tool_response_limit(monkeypatch):
     async def fake_get_history_steps(db, conversation_id):
         return [
@@ -385,3 +422,24 @@ async def test_system_prompt_runtime_variables_rerender_each_llm_call(monkeypatc
         "round=3 history=2 trace=1 llm=1 done_tools=0 next_tool=1 max=3 remaining=3",
         "round=3 history=2 trace=1 llm=2 done_tools=1 next_tool=2 max=3 remaining=2",
     ]
+
+
+def test_thinking_for_round_is_consistent_within_a_round():
+    """Thinking must be scoped to the whole round, not toggled per tool-loop
+    call. With the first-screen latency config (first round off, later rounds
+    on), round 1 stays off for ALL its calls so a mid-loop thinking-on
+    continuation never resends a thinking-off assistant turn without
+    reasoning_content (DeepSeek 400). Round 2+ follows subsequent_rounds.
+    """
+    fast_first = SimpleNamespace(
+        first_round_thinking=False, subsequent_rounds_thinking=True
+    )
+    assert svc._thinking_for_round(fast_first, 1) is False
+    assert svc._thinking_for_round(fast_first, 2) is True
+    assert svc._thinking_for_round(fast_first, 5) is True
+
+    think_first = SimpleNamespace(
+        first_round_thinking=True, subsequent_rounds_thinking=False
+    )
+    assert svc._thinking_for_round(think_first, 1) is True
+    assert svc._thinking_for_round(think_first, 2) is False

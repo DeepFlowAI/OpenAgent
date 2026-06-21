@@ -40,22 +40,18 @@ _MAX_LOG_LEN = 2000
 
 # Short name -> LiteLLM model identifier (OpenRouter fallback)
 OPENROUTER_MODEL_MAP: dict[str, str] = {
-    "gpt-4o": "openrouter/openai/gpt-4o",
     "deepseek-v4-pro": "openrouter/deepseek/deepseek-v4-pro",
-    "deepseek-v4-pro-official": "openrouter/deepseek/deepseek-v4-pro",
     "deepseek-v4-flash": "openrouter/deepseek/deepseek-v4-flash",
-    "kimi-k2.5": "openrouter/moonshotai/kimi-k2.5",
     "kimi-k2.6": "openrouter/moonshotai/kimi-k2.6",
-    "glm-5": "openrouter/z-ai/glm-5",
     "glm-5.1": "openrouter/z-ai/glm-5.1",
-    "ling-2.6-flash": "openrouter/inclusionai/ling-2.6-flash",
     "mimo-v2.5-pro": "openrouter/xiaomi/mimo-v2.5-pro",
-    "minimax-m2.5": "openrouter/minimax/minimax-m2.5",
     "minimax-m2.7": "openrouter/minimax/minimax-m2.7",
-    "step-3.5-flash": "openrouter/stepfun/step-3.5-flash",
-    "grok-4.20": "openrouter/x-ai/grok-4.20",
-    "grok-4.20-multi-agent": "openrouter/x-ai/grok-4.20-multi-agent",
 }
+
+MODEL_ALIASES: dict[str, str] = {
+    "deepseek-v4-pro-official": "deepseek-v4-pro",
+}
+
 
 def _provider_base_urls() -> dict[str, str]:
     # Read at call-site so tests / runtime overrides via env vars take effect.
@@ -73,6 +69,7 @@ PROVIDER_BASE_URLS: dict[str, str] = _provider_base_urls()
 # Upstream examples: kimi/kimi-k2.6, ZHIPU/GLM-5.1, MiniMax/MiniMax-M2.7
 BAILIAN_MODEL_MAP: dict[str, str] = {
     "deepseek-v4-pro": "openai/deepseek-v4-pro",
+    "deepseek-v4-flash": "openai/deepseek-v4-flash",
     "kimi-k2.6": "openai/kimi/kimi-k2.6",
     "glm-5.1": "openai/ZHIPU/GLM-5.1",
     "minimax-m2.7": "openai/MiniMax/MiniMax-M2.7",
@@ -82,12 +79,6 @@ BAILIAN_MODEL_MAP: dict[str, str] = {
 
 OFFICIAL_MODEL_MAP: dict[str, dict] = {
     "deepseek-v4-pro": {
-        "channel": "deepseek-official",
-        "model": "openai/deepseek-v4-pro",
-        "api_key_setting": "DEEPSEEK_API_KEY",
-        "api_base_setting": "DEEPSEEK_API_BASE_URL",
-    },
-    "deepseek-v4-pro-official": {
         "channel": "deepseek-official",
         "model": "openai/deepseek-v4-pro",
         "api_key_setting": "DEEPSEEK_API_KEY",
@@ -125,8 +116,9 @@ SILICONFLOW_MODEL_MAP: dict[str, str] = {
     "glm-5.1": "openai/Pro/zai-org/GLM-5.1",
 }
 
-OFFICIAL_ONLY_MODEL_IDS: frozenset[str] = frozenset(
-    {"deepseek-v4-pro-official", "deepseek-v4-flash"}
+OFFICIAL_ONLY_MODEL_IDS: frozenset[str] = frozenset()
+OFFICIAL_FIRST_MODEL_IDS: frozenset[str] = frozenset(
+    {"deepseek-v4-pro", "deepseek-v4-flash"}
 )
 
 PROVIDER_CHANNEL_NAMES: dict[str, str] = {
@@ -318,11 +310,18 @@ def _resolve_model(model: str) -> str:
     return OPENROUTER_MODEL_MAP.get(model, model)
 
 
+def _is_bailian_deepseek_v4_model(channel: str, resolved_model: str) -> bool:
+    return channel == "aliyun-bailian" and resolved_model in {
+        "openai/deepseek-v4-pro",
+        "openai/deepseek-v4-flash",
+    }
+
+
 def _preserve_reasoning_content(channel: str, resolved_model: str) -> bool:
     """Whether historical assistant reasoning should be replayed upstream."""
     if channel == "deepseek-official":
         return True
-    if channel == "aliyun-bailian" and resolved_model == "openai/deepseek-v4-pro":
+    if _is_bailian_deepseek_v4_model(channel, resolved_model):
         return True
     m = resolved_model.lower()
     return "kimi" in m or "moonshot" in m
@@ -389,6 +388,26 @@ def _bailian_candidate(model: str, *, allow_unmapped: bool = False) -> dict | No
     }
 
 
+def _official_candidate(model: str) -> dict | None:
+    official = OFFICIAL_MODEL_MAP.get(model)
+    if not official:
+        return None
+    api_key = getattr(settings, official["api_key_setting"])
+    if not api_key:
+        return None
+    return {
+        "channel": official["channel"],
+        "model": official["model"],
+        "api_key": api_key,
+        "api_base": getattr(settings, official["api_base_setting"]),
+        **(
+            {"temperature": official["temperature"]}
+            if "temperature" in official
+            else {}
+        ),
+    }
+
+
 def _filter_candidates_by_channels(
     candidates: list[dict], allowed: list[str], model: str
 ) -> list[dict]:
@@ -410,29 +429,22 @@ def _filter_candidates_by_channels(
 
 def _model_candidates(model: str) -> list[dict]:
     """Return provider candidates in priority order for a user-selected model."""
+    model = MODEL_ALIASES.get(model, model)
     candidates: list[dict] = []
+
+    if model in OFFICIAL_FIRST_MODEL_IDS:
+        official = _official_candidate(model)
+        if official:
+            candidates.append(official)
 
     bailian = _bailian_candidate(model)
     if bailian:
         candidates.append(bailian)
 
-    official = OFFICIAL_MODEL_MAP.get(model)
-    if official:
-        api_key = getattr(settings, official["api_key_setting"])
-        if api_key:
-            candidates.append(
-                {
-                    "channel": official["channel"],
-                    "model": official["model"],
-                    "api_key": api_key,
-                    "api_base": getattr(settings, official["api_base_setting"]),
-                    **(
-                        {"temperature": official["temperature"]}
-                        if "temperature" in official
-                        else {}
-                    ),
-                }
-            )
+    if model not in OFFICIAL_FIRST_MODEL_IDS:
+        official = _official_candidate(model)
+        if official:
+            candidates.append(official)
 
     siliconflow_model = SILICONFLOW_MODEL_MAP.get(model)
     if siliconflow_model and settings.SILICONFLOW_API_KEY:
@@ -461,6 +473,31 @@ def _model_candidates(model: str) -> list[dict]:
     return candidates
 
 
+def _log_provider_fallback(
+    *, model: str, from_channel: str, to_channel: str, reason: str, mode: str,
+    detail: str = "",
+) -> None:
+    """Structured WARN log for a provider-channel fallback (degradation).
+
+    Emits a stable body phrase ("LLM provider fallback") plus flat
+    ``log_attributes`` fields so downstream log aggregation (e.g. the daily
+    report) can count fallbacks per model without parsing free text.
+    """
+    logger.warning(
+        "LLM provider fallback — model=%s, from=%s, to=%s, reason=%s, mode=%s%s",
+        model, from_channel, to_channel, reason, mode,
+        f", detail={detail[:_MAX_LOG_LEN]}" if detail else "",
+        extra={
+            "llm_provider_fallback": "1",
+            "fallback_model": model,
+            "fallback_from": from_channel,
+            "fallback_to": to_channel,
+            "fallback_reason": reason,
+            "fallback_mode": mode,
+        },
+    )
+
+
 def _reliability_kwargs() -> dict:
     """LiteLLM kwargs for retries / timeout (env-driven)."""
     out: dict = {"num_retries": settings.LLM_NUM_RETRIES}
@@ -480,7 +517,7 @@ def _apply_thinking(kwargs: dict, thinking_enabled: bool, resolved_model: str, c
         )
         if thinking_enabled:
             kwargs["reasoning_effort"] = "high"
-    elif channel == "aliyun-bailian" and resolved_model == "openai/deepseek-v4-pro":
+    elif _is_bailian_deepseek_v4_model(channel, resolved_model):
         _merge_extra_body(kwargs, {"enable_thinking": thinking_enabled})
         if thinking_enabled:
             kwargs["reasoning_effort"] = "high"
@@ -565,9 +602,10 @@ class LiteLLMClient(BaseLLMClient):
                 break
             except litellm.exceptions.APIError as exc:
                 if idx < len(candidates) - 1:
-                    logger.warning(
-                        "LiteLLM API error on channel=%s — fallback to next provider: %s",
-                        channel, exc,
+                    _log_provider_fallback(
+                        model=model, from_channel=channel,
+                        to_channel=candidates[idx + 1]["channel"],
+                        reason="api_error", mode="sync", detail=str(exc),
                     )
                     continue
                 logger.error("LiteLLM API error — %s", exc)
@@ -670,9 +708,10 @@ class LiteLLMClient(BaseLLMClient):
                     break
                 except asyncio.TimeoutError:
                     if idx < len(candidates) - 1:
-                        logger.warning(
-                            "LLM stream connect timeout on channel=%s — fallback to next provider",
-                            channel,
+                        _log_provider_fallback(
+                            model=model, from_channel=channel,
+                            to_channel=candidates[idx + 1]["channel"],
+                            reason="connect_timeout", mode="stream",
                         )
                         continue
                     logger.warning(
@@ -687,9 +726,10 @@ class LiteLLMClient(BaseLLMClient):
                     raise
                 except litellm.exceptions.APIError as exc:
                     if idx < len(candidates) - 1:
-                        logger.warning(
-                            "LiteLLM API error on channel=%s — fallback to next provider: %s",
-                            channel, exc,
+                        _log_provider_fallback(
+                            model=model, from_channel=channel,
+                            to_channel=candidates[idx + 1]["channel"],
+                            reason="api_error", mode="stream", detail=str(exc),
                         )
                         continue
                     logger.error("LiteLLM API error — %s", exc)

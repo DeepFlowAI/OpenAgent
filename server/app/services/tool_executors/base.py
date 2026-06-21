@@ -7,6 +7,30 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+def str_arg(args: dict, key: str, default: str = "") -> str:
+    """Return ``args[key]`` as a stripped string.
+
+    LLM-generated tool arguments are untrusted: the model sometimes emits a
+    field as a list/int/null instead of the expected string. Those degrade to
+    ``default`` here instead of raising ``AttributeError`` (e.g. ``'list'
+    object has no attribute 'strip'``) deep inside an executor, which the
+    dispatcher would only surface as a generic ERROR-logged tool failure.
+    """
+    value = args.get(key, default)
+    return value.strip() if isinstance(value, str) else default
+
+
+def dict_arg(args: dict, key: str) -> dict:
+    """Return ``args[key]`` if it is a dict, else ``{}``.
+
+    Same rationale as :func:`str_arg`: the model occasionally passes an
+    object-typed arg (e.g. ``filter``) as a bare string or list, which would
+    otherwise crash with ``'str' object has no attribute 'get'``.
+    """
+    value = args.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 @dataclass
 class ToolContext:
     """Runtime context passed to every tool executor."""

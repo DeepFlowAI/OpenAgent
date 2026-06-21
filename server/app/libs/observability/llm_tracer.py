@@ -260,6 +260,7 @@ class TracedLLMClient(BaseLLMClient):
 
         async def _traced_stream() -> AsyncIterator[LLMStreamDelta]:
             with llm_span(f"chat {model}", attrs) as span:
+                finalized = False
                 try:
                     async for delta in inner_iter:
                         yield delta
@@ -269,10 +270,12 @@ class TracedLLMClient(BaseLLMClient):
                     )
                     span.set_attribute("gen_ai.error.status_code", exc.status_code)
                     span.set_status_error(exc.error_message)
+                    finalized = True
                     raise
                 except Exception as exc:  # noqa: BLE001
                     span.set_attribute("gen_ai.error.type", type(exc).__name__)
                     span.set_status_error(str(exc))
+                    finalized = True
                     raise
                 else:
                     _record_stream_result(span, result=result)
@@ -285,6 +288,21 @@ class TracedLLMClient(BaseLLMClient):
                         )
                     else:
                         span.set_status_ok()
+                    finalized = True
+                finally:
+                    # Consumer abandoned the stream early (client disconnect, user
+                    # navigation, tool-loop short-circuit). GeneratorExit /
+                    # CancelledError bypass the except/else above, so without this
+                    # the span would close UNSET with `gen_ai.system` still holding
+                    # the up-front model-name guess (e.g. glm-5.1 -> "zhipu") and
+                    # the actually-routed channel lost. Finalize from the shared
+                    # result so the real channel is recorded; keep status UNSET
+                    # (not ERROR) so cancellations don't inflate error/retry rates.
+                    if not finalized:
+                        _record_stream_result(span, result=result)
+                        span.set_attribute(
+                            "gen_ai.cancel.reason", "client_cancelled"
+                        )
 
         return _traced_stream(), result
 

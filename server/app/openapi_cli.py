@@ -246,6 +246,21 @@ ENDPOINTS: tuple[EndpointDoc, ...] = (
         example="python -m app.openapi_cli steps 1 42",
     ),
     EndpointDoc(
+        key="steps.get",
+        method="GET",
+        path="/api/v1/agents/{agent_id}/conversations/{conversation_id}/steps/{step_id}",
+        scope="chat",
+        summary="Get full execution step detail, including LLM request/response payload fields.",
+        path_params=[
+            _param("agent_id", "integer", True, "Agent ID."),
+            _param("conversation_id", "integer", True, "Conversation ID."),
+            _param("step_id", "integer", True, "Step ID."),
+        ],
+        response="StepDetailResponse with request_messages, request_tools, request_params, response fields, and child tool calls.",
+        errors=["401 missing or invalid API key", "404 step not found"],
+        example="python -m app.openapi_cli steps get 1 42 100",
+    ),
+    EndpointDoc(
         key="agents.list",
         method="GET",
         path="/api/v1/agents",
@@ -789,10 +804,24 @@ def handle_chat(args: argparse.Namespace) -> int:
 
 
 def handle_steps(args: argparse.Namespace) -> int:
+    action, values = parse_steps_args(args.steps_args)
+    if action == "get":
+        agent_id, conversation_id, step_id = values
+        return run_request(
+            args,
+            "steps.get",
+            {
+                "agent_id": agent_id,
+                "conversation_id": conversation_id,
+                "step_id": step_id,
+            },
+        )
+
+    agent_id, conversation_id = values
     return run_request(
         args,
         "steps.list",
-        {"agent_id": args.agent_id, "conversation_id": args.conversation_id},
+        {"agent_id": agent_id, "conversation_id": conversation_id},
     )
 
 
@@ -971,9 +1000,16 @@ def build_parser() -> argparse.ArgumentParser:
     add_json_args(chat)
     chat.set_defaults(handler=handle_chat)
 
-    steps = subparsers.add_parser("steps", help="List conversation execution steps.")
-    steps.add_argument("agent_id", type=int)
-    steps.add_argument("conversation_id", type=int)
+    steps = subparsers.add_parser(
+        "steps",
+        help="List conversation execution steps or get full step detail.",
+        description=(
+            "List conversation execution steps or get full step detail. "
+            "Forms: steps <agent_id> <conversation_id>; "
+            "steps get <agent_id> <conversation_id> <step_id>."
+        ),
+    )
+    steps.add_argument("steps_args", nargs="+", metavar="ARGS")
     steps.set_defaults(handler=handle_steps)
 
     agents = subparsers.add_parser("agents", help="Agent endpoints.")
@@ -1065,6 +1101,30 @@ def parse_bool(value: str) -> bool:
     if lowered in {"0", "false", "no", "n", "off"}:
         return False
     raise argparse.ArgumentTypeError("Expected boolean: true/false")
+
+
+def parse_steps_args(values: list[str]) -> tuple[str, tuple[int, ...]]:
+    action = "list"
+    raw_values = values
+    if values[0] in {"list", "get", "detail"}:
+        action = "get" if values[0] == "detail" else values[0]
+        raw_values = values[1:]
+    elif len(values) == 3:
+        action = "get"
+
+    expected = 3 if action == "get" else 2
+    if len(raw_values) != expected:
+        raise CliError(
+            "Usage: steps <agent_id> <conversation_id> or "
+            "steps get <agent_id> <conversation_id> <step_id>."
+        )
+
+    try:
+        parsed = tuple(int(value) for value in raw_values)
+    except ValueError as exc:
+        raise CliError("steps arguments must be integers.") from exc
+
+    return action, parsed
 
 
 def main(argv: list[str] | None = None) -> int:
