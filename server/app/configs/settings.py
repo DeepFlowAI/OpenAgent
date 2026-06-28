@@ -23,10 +23,53 @@ class Settings(BaseSettings):
         default=True, description="Run alembic upgrade head on startup"
     )
 
+    # ── Per-conversation round lock backend ──
+    # Serializes rounds within a single conversation (idempotent retries +
+    # "next round" ordering). Three implementations:
+    #   "memory"   — in-process asyncio lock keyed by conversation_id. Costs ZERO
+    #                DB connections, so concurrent in-flight rounds are NOT capped
+    #                by the lock pool. REQUIRES a single API worker/replica (the
+    #                deployment this project ships today; the detached chat runner
+    #                already enforces single-worker).
+    #   "advisory" — PostgreSQL session-level ``pg_advisory_lock`` on a dedicated
+    #                pinned connection (cross-process/replica safe, but each
+    #                in-flight round burns one lock-pool connection for its whole
+    #                duration).
+    #   "redis"    — Redis lock (SET NX PX + token + lease renewal). Cross-
+    #                process/replica safe and pins NO DB connection — use this for
+    #                multi-worker / multi-replica. Requires REDIS_URL.
+    ROUND_LOCK_BACKEND: str = Field(default="memory")
+
+    # ── Detached public-chat (Web SDK) runtime backend ──
+    # The public Web SDK round must survive SSE disconnects and only stop on an
+    # explicit cancel. Two implementations:
+    #   "memory" — in-process task registry + fan-out. REQUIRES a single API
+    #              worker (cancel/reattach must land on the owning process); the
+    #              service enforces this with a startup guard.
+    #   "redis"  — cross-process via Redis Streams: the worker that wins a SET-NX
+    #              claim runs the engine and XADDs each SSE event to a per-message
+    #              stream; any worker XREADs the stream (replaying the tail since
+    #              the client's Last-Event-ID, then tailing live), and cancel uses
+    #              a durable cancel key plus a pub/sub fast path. Enables multiple
+    #              workers/replicas and preserves reconnect/Last-Event-ID resume.
+    #              Requires REDIS_URL.
+    DETACHED_CHAT_BACKEND: str = Field(default="memory")
+
+    # Number of API replicas/containers behind the load balancer. The startup
+    # guard cannot detect replicas (each process only sees its own worker count),
+    # so set this explicitly when running >1 replica — it forces the Redis
+    # backends on, preventing two replicas from running the same conversation
+    # concurrently with in-process (memory) backends.
+    API_REPLICA_COUNT: int = Field(default=1, ge=1)
+
     # ── DB connection pools ──
     # Two pools share one PostgreSQL: the main pool serves short-lived request
     # queries; the lock pool serves the per-round advisory-lock connection that
-    # is pinned for an entire streaming chat round. Keep
+    # is pinned for an entire streaming chat round. With ROUND_LOCK_BACKEND
+    # "memory"/"redis" the lock pool is unused, and the engine releases its main
+    # connection during the LLM stream (the long part of a round), so neither
+    # pool bounds the number of concurrently generating rounds — the main pool
+    # only needs headroom for simultaneous short query bursts. Keep
     # (DB_POOL_SIZE + DB_MAX_OVERFLOW) + (DB_LOCK_POOL_SIZE + DB_LOCK_MAX_OVERFLOW)
     # comfortably under PostgreSQL ``max_connections`` (default 100).
     DB_POOL_SIZE: int = Field(default=20, ge=1)
@@ -111,6 +154,21 @@ class Settings(BaseSettings):
     # Comma-separated provider channels in fallback order (e.g. ``aliyun-bailian`` or
     # ``aliyun-bailian,openrouter``). Empty = built-in multi-provider fallback chain.
     LLM_PROVIDER_CHANNELS: str = Field(default="")
+
+    # ── LLM channel concurrency limiter (intentional backpressure) ──
+    # Caps concurrent in-flight LLM calls PER provider channel so a burst of
+    # rounds doesn't stampede the provider into 429s — making the LLM the
+    # explicit, graceful bottleneck instead of DB/CPU. A waiting call blocks on
+    # the semaphore (backpressure) until a slot frees. 0 = unlimited (default,
+    # backward compatible). NOTE: the semaphore is per worker process, so the
+    # effective global limit is ``value × workers × API_REPLICA_COUNT`` — size
+    # it as (provider concurrency budget ÷ number of API worker processes).
+    LLM_CHANNEL_CONCURRENCY: int = Field(default=0, ge=0)
+    # Per-channel overrides: "channel:n,channel:n" (e.g.
+    # "deepseek-official:20,aliyun-bailian:10"). Use channel:0 to leave a
+    # channel unlimited while other channels use the global cap. Channels not
+    # listed use LLM_CHANNEL_CONCURRENCY.
+    LLM_CHANNEL_CONCURRENCY_OVERRIDES: str = Field(default="")
 
     # ── Conversation title summary ──
     # After a conversation's first round completes, asynchronously generate a

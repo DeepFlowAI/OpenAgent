@@ -183,8 +183,157 @@ async def _resolve_round_state(
     return round_number, resume
 
 
+async def _release_db_connection(db: AsyncSession) -> None:
+    """Return this session's pooled connection before a long LLM await.
+
+    The engine threads one request-scoped session through an entire round, but
+    repository *reads* leave an idle-in-transaction connection checked out. A
+    chat round then spends most of its wall-clock time inside ``stream_chat``
+    (seconds), so without this the main pool would be pinned for the whole
+    stream — making DB connections, not the LLM, the concurrency ceiling.
+
+    Ending the transaction here checks the connection back into the pool; the
+    next query auto-begins a fresh transaction and checks one back out. With
+    ``expire_on_commit=False`` the identity-map objects (``conv`` etc.) stay
+    usable across the boundary. Only meaningful for a real ``AsyncSession`` —
+    test doubles have no pooled connection to release.
+    """
+    if not isinstance(db, AsyncSession):
+        return
+    if not db.in_transaction():
+        return
+    # The pre-stream path should only hold a *read* transaction (repositories
+    # commit their own writes). If uncommitted ORM changes are pending, do NOT
+    # commit them here — that would persist a write at an unintended point.
+    # Instead skip the release and keep the connection: correctness over pool
+    # efficiency for a state that shouldn't happen. Loud log so the offending
+    # caller is found and fixed.
+    if db.new or db.dirty or db.deleted:
+        logger.warning(
+            "Skipping pre-stream DB connection release: uncommitted ORM changes "
+            "pending (new=%d dirty=%d deleted=%d). The connection stays checked "
+            "out for this round to avoid a premature commit — this is unexpected "
+            "on the pre-stream path and should be fixed.",
+            len(db.new), len(db.dirty), len(db.deleted),
+        )
+        return
+    await db.commit()
+
+
+# ── In-process per-conversation locks (ROUND_LOCK_BACKEND="memory") ──
+# A keyed registry of asyncio.Locks, one per conversation_id. Acquiring a
+# round lock costs ZERO DB connections here, so concurrent in-flight rounds
+# are no longer capped by the dedicated lock pool — only by the main request
+# pool and the LLM provider limits. Safe only within a single event loop /
+# worker, which is the deployment this project ships (see ROUND_LOCK_BACKEND).
+_conversation_locks: dict[int, asyncio.Lock] = {}
+_conversation_lock_refcounts: dict[int, int] = {}
+
+
+def _acquire_conversation_lock_handle(conversation_id: int) -> asyncio.Lock:
+    """Register interest in a conversation's lock and return it.
+
+    Get/refcount mutation is synchronous (no ``await``) so it is atomic under
+    a single event loop. Pair every call with
+    :func:`_release_conversation_lock_handle` in a ``finally``.
+    """
+    lock = _conversation_locks.get(conversation_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _conversation_locks[conversation_id] = lock
+    _conversation_lock_refcounts[conversation_id] = (
+        _conversation_lock_refcounts.get(conversation_id, 0) + 1
+    )
+    return lock
+
+
+def _release_conversation_lock_handle(conversation_id: int) -> None:
+    """Drop interest; evict the lock once no waiter/holder references it."""
+    remaining = _conversation_lock_refcounts.get(conversation_id, 0) - 1
+    if remaining <= 0:
+        _conversation_lock_refcounts.pop(conversation_id, None)
+        _conversation_locks.pop(conversation_id, None)
+    else:
+        _conversation_lock_refcounts[conversation_id] = remaining
+
+
+@asynccontextmanager
+async def _hold_conversation_lock(
+    conversation_id: int, *, timeout_sec: float,
+) -> AsyncIterator[None]:
+    """In-process mutual exclusion for one conversation, bounded by ``timeout``.
+
+    Raises :class:`ConflictError` on timeout to mirror the advisory backend, so
+    SSE callers surface ``event: error`` instead of hanging forever.
+    """
+    lock = _acquire_conversation_lock_handle(conversation_id)
+    try:
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "In-process round lock wait timed out — conv=%s after %.1fs",
+                conversation_id, timeout_sec,
+            )
+            raise ConflictError(
+                f"Conversation {conversation_id} is still busy after "
+                f"{int(timeout_sec)}s; please retry shortly"
+            )
+        try:
+            yield
+        finally:
+            lock.release()
+    finally:
+        _release_conversation_lock_handle(conversation_id)
+
+
 @asynccontextmanager
 async def _hold_round_lock(
+    db: AsyncSession,
+    conv,
+    conversation_id: int,
+    client_message_id: str | None,
+    *,
+    timeout_sec: float = ROUND_LOCK_WAIT_TIMEOUT_SEC,
+) -> AsyncIterator[tuple[int, bool]]:
+    """Acquire the per-round lock, dispatching on ``ROUND_LOCK_BACKEND``.
+
+    Yields ``(round_number, resume)`` re-derived AFTER the lock is held, so a
+    request that waited through an in-flight round sees the fresh
+    ``conv.round_count`` / any ``user_message`` persisted under its
+    ``client_message_id`` — identical semantics across both backends.
+    """
+    if settings.ROUND_LOCK_BACKEND == "advisory":
+        async with _hold_round_lock_advisory(
+            db, conv, conversation_id, client_message_id, timeout_sec=timeout_sec,
+        ) as resolved:
+            yield resolved
+        return
+
+    if settings.ROUND_LOCK_BACKEND == "redis":
+        from app.services.distributed_lock import redis_lock
+        async with redis_lock(
+            f"round_lock:{conversation_id}", wait_timeout=timeout_sec,
+        ):
+            await db.refresh(conv)
+            round_number, resume = await _resolve_round_state(
+                db, conv, conversation_id, client_message_id,
+            )
+            yield round_number, resume
+        return
+
+    async with _hold_conversation_lock(conversation_id, timeout_sec=timeout_sec):
+        # The prior holder (if any) has fully committed and released by now;
+        # refresh so we observe its round_count advance / new user_message.
+        await db.refresh(conv)
+        round_number, resume = await _resolve_round_state(
+            db, conv, conversation_id, client_message_id,
+        )
+        yield round_number, resume
+
+
+@asynccontextmanager
+async def _hold_round_lock_advisory(
     db: AsyncSession,
     conv,
     conversation_id: int,
@@ -298,6 +447,40 @@ async def _hold_round_lock(
 
 @asynccontextmanager
 async def _hold_specific_round_lock(
+    db: AsyncSession,
+    conversation_id: int,
+    round_number: int,
+    *,
+    timeout_sec: float = ROUND_LOCK_WAIT_TIMEOUT_SEC,
+) -> AsyncIterator[None]:
+    """Acquire one fixed round lock, dispatching on ``ROUND_LOCK_BACKEND``.
+
+    The memory backend serializes per ``conversation_id`` (round_number is
+    implied), which is the same conversation-level mutual exclusion the chat
+    round lock uses — so a tool-result continuation and a fresh user turn still
+    cannot run concurrently.
+    """
+    if settings.ROUND_LOCK_BACKEND == "advisory":
+        async with _hold_specific_round_lock_advisory(
+            db, conversation_id, round_number, timeout_sec=timeout_sec,
+        ):
+            yield
+        return
+
+    if settings.ROUND_LOCK_BACKEND == "redis":
+        from app.services.distributed_lock import redis_lock
+        async with redis_lock(
+            f"round_lock:{conversation_id}", wait_timeout=timeout_sec,
+        ):
+            yield
+        return
+
+    async with _hold_conversation_lock(conversation_id, timeout_sec=timeout_sec):
+        yield
+
+
+@asynccontextmanager
+async def _hold_specific_round_lock_advisory(
     db: AsyncSession,
     conversation_id: int,
     round_number: int,
@@ -1297,6 +1480,9 @@ class AgentEngineService:
                 attempt_retry_count = 0
                 attempt_last_reason: str | None = None
                 delta_count = 0
+                # Release the pooled DB connection for the duration of the LLM
+                # stream — the loop below only emits SSE / accumulates in memory.
+                await _release_db_connection(db)
                 while True:
                     stream_iter, stream_result = await llm_client.stream_chat(
                         messages,
@@ -3034,6 +3220,8 @@ async def _stream_llm_with_retry_events(
     attempt_retry_count = 0
     attempt_last_reason: str | None = None
 
+    # Release the pooled DB connection for the duration of the LLM stream.
+    await _release_db_connection(db)
     while True:
         stream_iter, stream_result = await llm_client.stream_chat(
             messages,

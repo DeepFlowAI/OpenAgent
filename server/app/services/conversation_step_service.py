@@ -273,8 +273,49 @@ class ConversationStepService:
         if not ConversationStepService._feedback_enabled(channel):
             raise ValidationError("Feedback is disabled for this channel")
 
+        return await ConversationStepService._submit_feedback_for_step(
+            db,
+            tenant_id=channel.tenant_id,
+            agent_id=channel.agent_id,
+            step_id=step_id,
+            data=data,
+        )
+
+    @staticmethod
+    async def submit_api_feedback(
+        db: AsyncSession,
+        *,
+        tenant_id: str,
+        agent_id: int,
+        conversation_id: int,
+        step_id: int,
+        data: StepFeedbackSubmit,
+    ) -> dict:
+        """Submit or overwrite API caller feedback for one assistant reply step."""
+        return await ConversationStepService._submit_feedback_for_step(
+            db,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            conversation_id=conversation_id,
+            step_id=step_id,
+            data=data,
+        )
+
+    @staticmethod
+    async def _submit_feedback_for_step(
+        db: AsyncSession,
+        *,
+        tenant_id: str,
+        agent_id: int,
+        step_id: int,
+        data: StepFeedbackSubmit,
+        conversation_id: int | None = None,
+    ) -> dict:
+        """Validate step ownership and persist the latest feedback value."""
         step = await ConversationStepRepository.get_by_id(db, step_id)
-        if not step or step.tenant_id != channel.tenant_id:
+        if not step or step.tenant_id != tenant_id:
+            raise NotFoundError("Step not found")
+        if conversation_id is not None and step.conversation_id != conversation_id:
             raise NotFoundError("Step not found")
         if step.step_type != "assistant_message":
             raise ValidationError("Feedback can only be submitted for assistant messages")
@@ -284,8 +325,8 @@ class ConversationStepService:
         conversation = await ConversationRepository.get_by_id(db, step.conversation_id)
         if (
             not conversation
-            or conversation.tenant_id != channel.tenant_id
-            or conversation.agent_id != channel.agent_id
+            or conversation.tenant_id != tenant_id
+            or conversation.agent_id != agent_id
         ):
             raise NotFoundError("Step not found")
 

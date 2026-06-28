@@ -261,6 +261,25 @@ ENDPOINTS: tuple[EndpointDoc, ...] = (
         example="python -m app.openapi_cli steps get 1 42 100",
     ),
     EndpointDoc(
+        key="steps.feedback",
+        method="POST",
+        path="/api/v1/agents/{agent_id}/conversations/{conversation_id}/steps/{step_id}/feedback",
+        scope="chat",
+        summary="Submit or overwrite like/dislike feedback for one completed assistant_message step.",
+        path_params=[
+            _param("agent_id", "integer", True, "Agent ID."),
+            _param("conversation_id", "integer", True, "Conversation ID."),
+            _param("step_id", "integer", True, "Assistant message Step ID."),
+        ],
+        body_fields=[
+            _param("rating", "string", True, "Feedback rating: like or dislike."),
+            _param("comment", "string", False, "Optional feedback comment, max 500 characters."),
+        ],
+        response="StepFeedbackResponse with step_id, feedback_rating, feedback_comment, and feedback_updated_at.",
+        errors=["400 invalid step state", "401 missing or invalid API key", "403 scope missing", "404 step not found", "422 validation error"],
+        example="python -m app.openapi_cli steps feedback 1 42 100 --rating like --comment 'Helpful answer'",
+    ),
+    EndpointDoc(
         key="agents.list",
         method="GET",
         path="/api/v1/agents",
@@ -816,6 +835,21 @@ def handle_steps(args: argparse.Namespace) -> int:
                 "step_id": step_id,
             },
         )
+    if action == "feedback":
+        agent_id, conversation_id, step_id = values
+        body = merge_payload(args, {"rating": args.rating, "comment": args.comment})
+        if "rating" not in body:
+            raise CliError("Missing feedback rating. Pass --rating like|dislike or include rating in --json.")
+        return run_request(
+            args,
+            "steps.feedback",
+            {
+                "agent_id": agent_id,
+                "conversation_id": conversation_id,
+                "step_id": step_id,
+            },
+            body=body,
+        )
 
     agent_id, conversation_id = values
     return run_request(
@@ -1002,14 +1036,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     steps = subparsers.add_parser(
         "steps",
-        help="List conversation execution steps or get full step detail.",
+        help="List, inspect, or submit feedback for conversation execution steps.",
         description=(
-            "List conversation execution steps or get full step detail. "
+            "List conversation execution steps, get full step detail, or submit feedback. "
             "Forms: steps <agent_id> <conversation_id>; "
-            "steps get <agent_id> <conversation_id> <step_id>."
+            "steps get <agent_id> <conversation_id> <step_id>; "
+            "steps feedback <agent_id> <conversation_id> <step_id> --rating like."
         ),
     )
     steps.add_argument("steps_args", nargs="+", metavar="ARGS")
+    steps.add_argument("--rating", choices=["like", "dislike"])
+    steps.add_argument("--comment")
+    add_json_args(steps)
     steps.set_defaults(handler=handle_steps)
 
     agents = subparsers.add_parser("agents", help="Agent endpoints.")
@@ -1106,17 +1144,18 @@ def parse_bool(value: str) -> bool:
 def parse_steps_args(values: list[str]) -> tuple[str, tuple[int, ...]]:
     action = "list"
     raw_values = values
-    if values[0] in {"list", "get", "detail"}:
+    if values[0] in {"list", "get", "detail", "feedback"}:
         action = "get" if values[0] == "detail" else values[0]
         raw_values = values[1:]
     elif len(values) == 3:
         action = "get"
 
-    expected = 3 if action == "get" else 2
+    expected = 3 if action in {"get", "feedback"} else 2
     if len(raw_values) != expected:
         raise CliError(
             "Usage: steps <agent_id> <conversation_id> or "
-            "steps get <agent_id> <conversation_id> <step_id>."
+            "steps get <agent_id> <conversation_id> <step_id> or "
+            "steps feedback <agent_id> <conversation_id> <step_id> --rating like|dislike."
         )
 
     try:

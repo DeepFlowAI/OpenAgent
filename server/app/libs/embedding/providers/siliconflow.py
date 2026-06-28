@@ -6,8 +6,10 @@ keeps failing the provider fails over to a backup model on the same provider
 (e.g. ``Pro/BAAI/bge-m3`` → ``BAAI/bge-m3``). Both models share the same
 vector space, so the cached document embeddings stay comparable.
 """
+import asyncio
 import httpx
 import logging
+import random
 
 from app.libs.embedding.base import BaseEmbeddingProvider
 from app.configs.settings import settings
@@ -15,9 +17,12 @@ from app.configs.settings import settings
 logger = logging.getLogger(__name__)
 
 BGE_M3_DIMENSION = 1024
-# Per-model attempt budget: how many times each model is tried (immediate
-# retries, no backoff) before giving up on it.
+# Per-model attempt budget: how many times each model is tried before giving
+# up on it. Rate-limit (429) errors back off between attempts; other errors
+# are retried immediately.
 EMBED_MAX_ATTEMPTS = 3
+# Base backoff (seconds) for 429 retries: exponential (base * 2**n) + jitter.
+EMBED_BACKOFF_BASE = 0.5
 
 
 class SiliconFlowEmbeddingProvider(BaseEmbeddingProvider):
@@ -58,7 +63,7 @@ class SiliconFlowEmbeddingProvider(BaseEmbeddingProvider):
             except Exception as primary_exc:  # noqa: BLE001
                 if not self._fallback_model or self._fallback_model == self._model:
                     raise
-                logger.error(
+                logger.warning(
                     "Embedding primary model failed after %d attempts, failing "
                     "over to backup — primary=%s backup=%s texts=%d last_error=%r",
                     EMBED_MAX_ATTEMPTS,
@@ -88,7 +93,7 @@ class SiliconFlowEmbeddingProvider(BaseEmbeddingProvider):
                 return await self._embed_once(client, model, texts)
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                logger.error(
+                logger.warning(
                     "Embedding attempt %d/%d failed — model=%s texts=%d error=%r",
                     attempt,
                     EMBED_MAX_ATTEMPTS,
@@ -96,8 +101,34 @@ class SiliconFlowEmbeddingProvider(BaseEmbeddingProvider):
                     len(texts),
                     exc,
                 )
+                if attempt < EMBED_MAX_ATTEMPTS:
+                    delay = self._retry_delay(attempt, exc)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
         assert last_exc is not None
         raise last_exc
+
+    def _retry_delay(self, attempt: int, exc: Exception) -> float:
+        """Backoff before the next retry.
+
+        Only rate-limit (429) errors back off: honors the ``Retry-After``
+        header when present, otherwise exponential backoff with jitter. Other
+        errors are retried immediately (returns 0).
+        """
+        if not (
+            isinstance(exc, httpx.HTTPStatusError)
+            and exc.response.status_code == 429
+        ):
+            return 0.0
+        retry_after = exc.response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return float(retry_after)
+            except ValueError:
+                pass
+        return EMBED_BACKOFF_BASE * (2 ** (attempt - 1)) + random.uniform(
+            0, EMBED_BACKOFF_BASE
+        )
 
     async def _embed_once(
         self, client: httpx.AsyncClient, model: str, texts: list[str]

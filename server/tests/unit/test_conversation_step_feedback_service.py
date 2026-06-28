@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
-from app.core.exceptions import ValidationError
+from app.core.exceptions import NotFoundError, ValidationError
 from app.schemas.conversation_step import StepFeedbackSubmit
 from app.services.conversation_service import ConversationService
 from app.services.conversation_step_service import ConversationStepService
@@ -79,6 +79,65 @@ class TestConversationStepFeedbackService:
         assert result["feedback_comment"] == "useful"
         assert result["feedback_updated_at"] is not None
         step_repo.update_feedback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_submit_api_feedback_updates_assistant_step(self):
+        db = AsyncMock()
+        step = _assistant_step()
+        conversation = SimpleNamespace(
+            tenant_id="T_TEST_001",
+            agent_id=7,
+        )
+
+        async def update_feedback(_db, item, *, rating, comment, updated_at):
+            item.feedback_rating = rating
+            item.feedback_comment = comment
+            item.feedback_updated_at = updated_at
+            return item
+
+        with (
+            patch("app.services.conversation_step_service.ConversationStepRepository") as step_repo,
+            patch("app.services.conversation_step_service.ConversationRepository") as conv_repo,
+        ):
+            step_repo.get_by_id = AsyncMock(return_value=step)
+            step_repo.update_feedback = AsyncMock(side_effect=update_feedback)
+            conv_repo.get_by_id = AsyncMock(return_value=conversation)
+
+            result = await ConversationStepService.submit_api_feedback(
+                db,
+                tenant_id="T_TEST_001",
+                agent_id=7,
+                conversation_id=23,
+                step_id=step.id,
+                data=StepFeedbackSubmit(rating="dislike", comment="  needs sources  "),
+            )
+
+        assert result["step_id"] == step.id
+        assert result["feedback_rating"] == "dislike"
+        assert result["feedback_comment"] == "needs sources"
+        assert result["feedback_updated_at"] is not None
+        step_repo.update_feedback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_submit_api_feedback_rejects_step_outside_path_conversation(self):
+        with (
+            patch("app.services.conversation_step_service.ConversationStepRepository") as step_repo,
+            patch("app.services.conversation_step_service.ConversationRepository") as conv_repo,
+        ):
+            step_repo.get_by_id = AsyncMock(return_value=_assistant_step(conversation_id=24))
+            conv_repo.get_by_id = AsyncMock()
+
+            with pytest.raises(NotFoundError, match="Step not found"):
+                await ConversationStepService.submit_api_feedback(
+                    AsyncMock(),
+                    tenant_id="T_TEST_001",
+                    agent_id=7,
+                    conversation_id=23,
+                    step_id=11,
+                    data=StepFeedbackSubmit(rating="like", comment=None),
+                )
+
+        conv_repo.get_by_id.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_submit_public_feedback_rejects_disabled_channel(self):

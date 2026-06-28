@@ -38,6 +38,64 @@ logger = logging.getLogger(__name__)
 
 _MAX_LOG_LEN = 2000
 
+# ── Per-channel concurrency limiter ──
+# One asyncio.Semaphore per provider channel, sized by settings. Held for the
+# whole duration of an in-flight call (the entire stream for stream_chat) so a
+# burst of rounds queues on the semaphore instead of stampeding the provider.
+# Semaphores are per event loop / worker process; the global cap is
+# ``limit × workers × replicas`` (see LLM_CHANNEL_CONCURRENCY docs).
+_channel_semaphores: dict[str, asyncio.Semaphore] = {}
+_channel_limit_overrides: dict[str, int] | None = None
+
+
+def _parse_channel_overrides() -> dict[str, int]:
+    global _channel_limit_overrides
+    if _channel_limit_overrides is None:
+        parsed: dict[str, int] = {}
+        for item in settings.LLM_CHANNEL_CONCURRENCY_OVERRIDES.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if ":" not in item:
+                logger.warning("Ignoring malformed LLM channel override: %r", item)
+                continue
+            name, _, num = item.partition(":")
+            name = name.strip()
+            try:
+                limit = int(num.strip())
+            except ValueError:
+                logger.warning("Ignoring non-integer LLM channel override: %r", item)
+                continue
+            if not name or limit < 0:
+                logger.warning("Ignoring invalid LLM channel override: %r", item)
+                continue
+            # 0 is meaningful: override this channel to unlimited even when the
+            # global LLM_CHANNEL_CONCURRENCY is non-zero.
+            if name:
+                parsed[name] = limit
+        _channel_limit_overrides = parsed
+    return _channel_limit_overrides
+
+
+def _channel_limit(channel: str) -> int:
+    """Concurrency cap for a channel; 0 means unlimited."""
+    override = _parse_channel_overrides().get(channel)
+    if override is not None:
+        return override
+    return settings.LLM_CHANNEL_CONCURRENCY
+
+
+def _channel_semaphore(channel: str) -> asyncio.Semaphore | None:
+    """The channel's limiter, or ``None`` when unlimited (limit <= 0)."""
+    limit = _channel_limit(channel)
+    if limit <= 0:
+        return None
+    sem = _channel_semaphores.get(channel)
+    if sem is None:
+        sem = asyncio.Semaphore(limit)
+        _channel_semaphores[channel] = sem
+    return sem
+
 # Short name -> LiteLLM model identifier (OpenRouter fallback)
 OPENROUTER_MODEL_MAP: dict[str, str] = {
     "deepseek-v4-pro": "openrouter/deepseek/deepseek-v4-pro",
@@ -596,6 +654,9 @@ class LiteLLMClient(BaseLLMClient):
                 model, resolved, channel, len(messages), len(tools) if tools else 0, thinking_enabled,
             )
 
+            sem = _channel_semaphore(channel)
+            if sem is not None:
+                await sem.acquire()
             try:
                 response = await litellm.acompletion(**kwargs)
                 selected_channel = channel
@@ -613,6 +674,11 @@ class LiteLLMClient(BaseLLMClient):
                     status_code=getattr(exc, "status_code", 500),
                     message=str(exc),
                 ) from exc
+            finally:
+                # Sync call: the provider work is done once acompletion returns,
+                # so always release (no streaming hold like stream_chat).
+                if sem is not None:
+                    sem.release()
 
         if response is None:
             raise LLMAPIError(status_code=500, message="LLM request failed without response")
@@ -677,6 +743,7 @@ class LiteLLMClient(BaseLLMClient):
 
         async def _stream() -> AsyncIterator[LLMStreamDelta]:
             response = None
+            held_sem: asyncio.Semaphore | None = None
             for idx, candidate in enumerate(candidates):
                 resolved = candidate["model"]
                 channel = candidate["channel"]
@@ -698,14 +765,20 @@ class LiteLLMClient(BaseLLMClient):
                     model, resolved, channel, len(messages), len(tools) if tools else 0, thinking_enabled,
                 )
 
+                # Gate on the channel limiter BEFORE opening the upstream stream,
+                # so a queued call doesn't hold a provider connection while it
+                # waits. Released on failover/failure here; on success it is held
+                # by ``held_sem`` and freed in the streaming ``finally`` below.
+                sem = _channel_semaphore(channel)
+                if sem is not None:
+                    await sem.acquire()
+                selected = False
                 try:
                     response = await asyncio.wait_for(
                         litellm.acompletion(**kwargs),
                         timeout=settings.LLM_FIRST_CHUNK_TIMEOUT_SEC,
                     )
-                    result.provider_channel = channel
-                    result.provider_name = PROVIDER_CHANNEL_NAMES.get(channel)
-                    break
+                    selected = True
                 except asyncio.TimeoutError:
                     if idx < len(candidates) - 1:
                         _log_provider_fallback(
@@ -737,6 +810,14 @@ class LiteLLMClient(BaseLLMClient):
                         status_code=getattr(exc, "status_code", 500),
                         message=str(exc),
                     ) from exc
+                finally:
+                    if sem is not None and not selected:
+                        sem.release()
+
+                result.provider_channel = channel
+                result.provider_name = PROVIDER_CHANNEL_NAMES.get(channel)
+                held_sem = sem
+                break
 
             if response is None:
                 raise LLMAPIError(status_code=500, message="LLM request failed without response")
@@ -891,6 +972,8 @@ class LiteLLMClient(BaseLLMClient):
                 await _close_litellm_stream(chunk_iter)
                 if chunk_iter is not response:
                     await _close_litellm_stream(response)
+                if held_sem is not None:
+                    held_sem.release()
 
             # ── Stream finished naturally — validate finish_reason ──
             # `length` counts as "valid" here (engine-level continuation is out of

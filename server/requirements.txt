@@ -14,7 +14,10 @@ PyJWT
 passlib[bcrypt]
 
 # Redis
-redis
+# Pin to 5.x: redis-py 6.x sends a RESP3 `HELLO` handshake on connect, which
+# Aliyun Redis (older engine / proxy mode) rejects with "unknown command HELLO".
+# 5.x defaults to RESP2 and never sends HELLO, so it stays compatible.
+redis>=5.0,<6.0
 
 # Knowledge Base - Git & Document Parsing
 gitpython

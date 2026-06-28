@@ -19,8 +19,57 @@ init_observability()
 setup_logging()
 
 
+def _validate_concurrency_config() -> None:
+    """Fail fast on unsafe concurrency configurations.
+
+    Multiple API workers/replicas only serialize per-conversation rounds and
+    survive detached-chat cancel/reattach when both the round lock and the
+    detached-chat runtime are Redis-backed; the in-process backends are correct
+    only within a single process. Catching this at startup avoids silent data
+    races (two workers running the same conversation) in production.
+    """
+    valid_lock = {"memory", "advisory", "redis"}
+    valid_detached = {"memory", "redis"}
+    if settings.ROUND_LOCK_BACKEND not in valid_lock:
+        raise RuntimeError(
+            f"Invalid ROUND_LOCK_BACKEND={settings.ROUND_LOCK_BACKEND!r}; "
+            f"expected one of {sorted(valid_lock)}."
+        )
+    if settings.DETACHED_CHAT_BACKEND not in valid_detached:
+        raise RuntimeError(
+            f"Invalid DETACHED_CHAT_BACKEND={settings.DETACHED_CHAT_BACKEND!r}; "
+            f"expected one of {sorted(valid_detached)}."
+        )
+
+    redis_lock = settings.ROUND_LOCK_BACKEND == "redis"
+    redis_detached = settings.DETACHED_CHAT_BACKEND == "redis"
+
+    if (redis_lock or redis_detached) and not settings.REDIS_URL:
+        raise RuntimeError(
+            "ROUND_LOCK_BACKEND/DETACHED_CHAT_BACKEND='redis' requires REDIS_URL."
+        )
+
+    from app.services.detached_chat_stream_service import _configured_worker_count
+
+    # Total processes = workers-per-replica × replicas. The replica count can't
+    # be auto-detected (each process only sees its own workers), so it must be
+    # declared via API_REPLICA_COUNT.
+    workers = _configured_worker_count()
+    total_processes = workers * settings.API_REPLICA_COUNT
+    if total_processes > 1 and not (redis_lock and redis_detached):
+        raise RuntimeError(
+            f"Detected {total_processes} total API processes "
+            f"({workers} workers x {settings.API_REPLICA_COUNT} replicas), but "
+            "running >1 process requires ROUND_LOCK_BACKEND='redis' AND "
+            "DETACHED_CHAT_BACKEND='redis' (in-process backends are "
+            "single-process only). If you run multiple replicas, set "
+            "API_REPLICA_COUNT and both redis backends."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _validate_concurrency_config()
     run_migrations()
     async with AsyncSessionLocal() as db:
         await seed_system_defaults(db)

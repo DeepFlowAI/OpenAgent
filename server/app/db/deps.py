@@ -80,6 +80,18 @@ def require_scope(scope: str):
     return _check
 
 
+def require_api_key_scope(scope: str):
+    """Dependency factory for OpenAPI routes that must use a scoped API key."""
+    async def _check(auth: AuthContext = Depends(resolve_auth)) -> str:
+        from app.core.exceptions import ForbiddenError, UnauthorizedError
+        if auth.scopes is None:
+            raise UnauthorizedError("Missing or invalid API key")
+        if scope not in auth.scopes:
+            raise ForbiddenError(f"API key lacks required scope: {scope}")
+        return auth.tenant_id
+    return _check
+
+
 # ── Legacy verify_api_key (kept for backward compat with search / document routes) ──
 
 async def verify_api_key(

@@ -23,6 +23,13 @@ async def _create_agent(client: AsyncClient) -> int:
     return resp.json()["id"]
 
 
+async def _create_api_key(client: AsyncClient, scopes: list[str]) -> str:
+    payload = {"name": unique_name("key"), "scopes": scopes}
+    resp = await client.post("/api/v1/system/api-keys", json=payload, headers=HEADERS)
+    assert resp.status_code == 201
+    return resp.json()["key_value"]
+
+
 async def _create_conversation(client: AsyncClient, agent_id: int) -> dict:
     payload = {"agent_id": agent_id, "user_id": "step_test_user", "source": "chat"}
     resp = await client.post(
@@ -66,6 +73,44 @@ class TestConversationStepAPI:
         assert data["conversation_id"] == conv["id"]
         assert data["steps"] == []
         assert data["total_steps"] == 0
+
+    @pytest.mark.asyncio
+    async def test_submit_feedback_with_api_key_updates_assistant_step(self, client: AsyncClient):
+        agent_id = await _create_agent(client)
+        conv = await _create_conversation(client, agent_id)
+        step = await _create_step(
+            client,
+            agent_id,
+            conv["id"],
+            step_type="assistant_message",
+            content="Helpful answer",
+        )
+        api_key = await _create_api_key(client, ["chat"])
+
+        resp = await client.post(
+            f"/api/v1/agents/{agent_id}/conversations/{conv['id']}/steps/{step['id']}/feedback",
+            json={"rating": "like", "comment": "  clear answer  "},
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["step_id"] == step["id"]
+        assert data["feedback_rating"] == "like"
+        assert data["feedback_comment"] == "clear answer"
+        assert data["feedback_updated_at"]
+
+    @pytest.mark.asyncio
+    async def test_submit_feedback_with_api_key_requires_chat_scope(self, client: AsyncClient):
+        api_key = await _create_api_key(client, ["config"])
+
+        resp = await client.post(
+            "/api/v1/agents/1/conversations/1/steps/1/feedback",
+            json={"rating": "like"},
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+
+        assert resp.status_code == 403
 
     @pytest.mark.asyncio
     async def test_create_user_message_step(self, client: AsyncClient):
@@ -510,7 +555,7 @@ class TestConversationStepAPI:
 
     @pytest.mark.asyncio
     async def test_hold_round_lock_waits_until_release(
-        self, client: AsyncClient,
+        self, client: AsyncClient, monkeypatch,
     ):
         """Sub-req 3: ``_hold_round_lock`` is the engine-level entry point
         that BLOCKS (with a bounded timeout) instead of failing fast. The
@@ -526,13 +571,20 @@ class TestConversationStepAPI:
         Without the wait B would have surfaced a 409 to the user mid-retry
         — the whole point of sub-req 3 is to make that recoverable
         transparently.
+
+        Pinned to the PostgreSQL advisory backend: the holder uses the real
+        ``pg_advisory_lock`` primitive, which only the advisory backend of
+        ``_hold_round_lock`` contends with.
         """
+        from app.configs.settings import settings
         from app.db.session import AsyncSessionLocal
         from app.repositories.conversation_repository import ConversationRepository
         from app.services.agent_engine_service import (
             _hold_round_lock,
             _round_advisory_lock,
         )
+
+        monkeypatch.setattr(settings, "ROUND_LOCK_BACKEND", "advisory")
 
         agent_id = await _create_agent(client)
         conv_dict = await _create_conversation(client, agent_id)
@@ -584,11 +636,15 @@ class TestConversationStepAPI:
 
     @pytest.mark.asyncio
     async def test_hold_round_lock_timeout_raises_conflict(
-        self, client: AsyncClient,
+        self, client: AsyncClient, monkeypatch,
     ):
         """If a wedged round never releases the lock within the timeout
         budget, ``_hold_round_lock`` MUST surface a ``ConflictError`` so
-        SSE callers see ``event: error`` instead of an indefinite hang."""
+        SSE callers see ``event: error`` instead of an indefinite hang.
+
+        Pinned to the advisory backend (see the waits-until-release test).
+        """
+        from app.configs.settings import settings
         from app.core.exceptions import ConflictError
         from app.db.session import AsyncSessionLocal
         from app.repositories.conversation_repository import ConversationRepository
@@ -596,6 +652,8 @@ class TestConversationStepAPI:
             _hold_round_lock,
             _round_advisory_lock,
         )
+
+        monkeypatch.setattr(settings, "ROUND_LOCK_BACKEND", "advisory")
 
         agent_id = await _create_agent(client)
         conv_dict = await _create_conversation(client, agent_id)
@@ -617,6 +675,109 @@ class TestConversationStepAPI:
                         pass  # pragma: no cover — should never enter
             finally:
                 await holder_ctx.__aexit__(None, None, None)
+
+    @pytest.mark.asyncio
+    async def test_hold_round_lock_memory_backend_serializes(
+        self, client: AsyncClient, monkeypatch,
+    ):
+        """Default ``memory`` backend serializes rounds per conversation with
+        ZERO DB lock connections: while holder A is inside ``_hold_round_lock``,
+        a concurrent B for the same conversation must wait, then acquire once A
+        releases — re-deriving the same round number.
+        """
+        from app.configs.settings import settings
+        from app.db.session import AsyncSessionLocal
+        from app.repositories.conversation_repository import ConversationRepository
+        from app.services.agent_engine_service import _hold_round_lock
+
+        monkeypatch.setattr(settings, "ROUND_LOCK_BACKEND", "memory")
+
+        agent_id = await _create_agent(client)
+        conv_dict = await _create_conversation(client, agent_id)
+        conv_id = conv_dict["id"]
+
+        async with AsyncSessionLocal() as session_a, AsyncSessionLocal() as session_b:
+            conv_a = await ConversationRepository.get_by_id(session_a, conv_id)
+            conv_b = await ConversationRepository.get_by_id(session_b, conv_id)
+            initial_round = (conv_a.round_count or 0) + 1
+
+            release_a = asyncio.Event()
+            b_acquired = asyncio.Event()
+
+            async def holder_a():
+                async with _hold_round_lock(
+                    session_a, conv_a, conv_id, client_message_id=None,
+                    timeout_sec=10.0,
+                ):
+                    await release_a.wait()
+
+            async def waiter_b():
+                async with _hold_round_lock(
+                    session_b, conv_b, conv_id, client_message_id=None,
+                    timeout_sec=10.0,
+                ) as (rn, resume):
+                    b_acquired.set()
+                    return rn, resume
+
+            a_task = asyncio.create_task(holder_a())
+            await asyncio.sleep(0.1)  # let A take the lock first
+            b_task = asyncio.create_task(waiter_b())
+
+            await asyncio.sleep(0.3)
+            assert not b_acquired.is_set(), (
+                "B must wait while A holds the in-process conversation lock"
+            )
+
+            release_a.set()
+            await asyncio.wait_for(a_task, timeout=5.0)
+            rn, resume = await asyncio.wait_for(b_task, timeout=5.0)
+            assert b_acquired.is_set()
+            assert rn == initial_round
+            assert resume is False
+
+    @pytest.mark.asyncio
+    async def test_hold_round_lock_memory_backend_timeout_raises_conflict(
+        self, client: AsyncClient, monkeypatch,
+    ):
+        """Memory backend honors the wait budget: a second waiter that can't
+        acquire within ``timeout_sec`` surfaces ``ConflictError``."""
+        from app.configs.settings import settings
+        from app.core.exceptions import ConflictError
+        from app.db.session import AsyncSessionLocal
+        from app.repositories.conversation_repository import ConversationRepository
+        from app.services.agent_engine_service import _hold_round_lock
+
+        monkeypatch.setattr(settings, "ROUND_LOCK_BACKEND", "memory")
+
+        agent_id = await _create_agent(client)
+        conv_dict = await _create_conversation(client, agent_id)
+        conv_id = conv_dict["id"]
+
+        async with AsyncSessionLocal() as session_a, AsyncSessionLocal() as session_b:
+            conv_a = await ConversationRepository.get_by_id(session_a, conv_id)
+            conv_b = await ConversationRepository.get_by_id(session_b, conv_id)
+
+            release_a = asyncio.Event()
+
+            async def holder_a():
+                async with _hold_round_lock(
+                    session_a, conv_a, conv_id, client_message_id=None,
+                    timeout_sec=10.0,
+                ):
+                    await release_a.wait()
+
+            a_task = asyncio.create_task(holder_a())
+            await asyncio.sleep(0.1)
+            try:
+                with pytest.raises(ConflictError):
+                    async with _hold_round_lock(
+                        session_b, conv_b, conv_id, client_message_id=None,
+                        timeout_sec=0.5,
+                    ):
+                        pass  # pragma: no cover — should never enter
+            finally:
+                release_a.set()
+                await asyncio.wait_for(a_task, timeout=5.0)
 
     # ── sub-req 2 (cancel path): partial persistence under shield ─────
 

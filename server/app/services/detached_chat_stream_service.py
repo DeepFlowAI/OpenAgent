@@ -17,6 +17,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import AsyncIterator
 
+from app.configs.settings import settings
+from app.core.exceptions import ValidationError
 from app.db import session as db_session
 from app.services.agent_engine_service import AgentEngineService
 from app.services.round_event_buffer import RoundKey, parse_event_id, round_event_buffer
@@ -94,6 +96,30 @@ class DetachedChatStreamService:
         client_message_id: str | None,
         last_event_id: str | None,
     ) -> AsyncIterator[str]:
+        if settings.DETACHED_CHAT_BACKEND == "redis":
+            # The Redis backend keys its claim/stream/cancel state on
+            # client_message_id; without it there is nothing to claim, replay or
+            # cancel across workers. Falling back to the in-process direct stream
+            # here would silently lose detached/reconnect semantics on a config
+            # that explicitly opted into multi-worker, so reject instead.
+            if not client_message_id:
+                raise ValidationError(
+                    "client_message_id is required when DETACHED_CHAT_BACKEND=redis"
+                )
+            from app.services.detached_chat_redis import stream_public_chat_redis
+            async for event in stream_public_chat_redis(
+                channel_token=channel_token,
+                agent_id=agent_id,
+                user_message=user_message,
+                conversation_id=conversation_id,
+                customer_context=customer_context,
+                resume=resume,
+                client_message_id=client_message_id,
+                last_event_id=last_event_id,
+            ):
+                yield event
+            return
+
         cls._ensure_single_process_runtime()
         if not client_message_id:
             async for event in cls._stream_direct(
@@ -162,6 +188,13 @@ class DetachedChatStreamService:
         channel_token: str,
         client_message_id: str,
     ) -> bool:
+        if settings.DETACHED_CHAT_BACKEND == "redis":
+            from app.services.detached_chat_redis import cancel_public_chat_redis
+            return await cancel_public_chat_redis(
+                channel_token=channel_token,
+                client_message_id=client_message_id,
+            )
+
         cls._ensure_single_process_runtime()
         key = DetachedChatKey(
             scope="public_channel",

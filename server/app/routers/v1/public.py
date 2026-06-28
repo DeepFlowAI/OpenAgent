@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse, Response
 from fastapi.routing import APIRoute
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.configs.settings import settings
 from app.core.exceptions import NotFoundError, UnauthorizedError, ValidationError
 from app.core.embed_token import sign_embed_token, verify_embed_token
 from app.core.trace import (
@@ -124,6 +125,15 @@ async def public_chat(
     channel = await ChannelService.get_by_token(db, token)
     if not channel.agent_id:
         raise NotFoundError("Channel has no agent bound")
+
+    # The Redis detached backend keys its claim/stream/cancel state on
+    # client_message_id; validate here (before the StreamingResponse) so a
+    # missing key surfaces as a real HTTP 400 rather than an in-stream
+    # ``event: error`` swallowed by the SSE generator below.
+    if settings.DETACHED_CHAT_BACKEND == "redis" and not body.client_message_id:
+        raise ValidationError(
+            "client_message_id is required when DETACHED_CHAT_BACKEND=redis"
+        )
 
     agent = await AgentService.get_by_id(db, channel.agent_id)
 
