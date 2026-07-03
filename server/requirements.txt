@@ -29,6 +29,9 @@ litellm==1.86.2
 # AI Search - Embedding & Vector
 pgvector
 httpx
+# Chinese word segmentation for the PGroonga keyword backend (query-side
+# tokenization; see docs/搜索性能与准确性优化.md). Only used when KB_PGROONGA_ENABLED.
+jieba
 
 # OSS
 oss2

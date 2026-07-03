@@ -1,4 +1,5 @@
 from app.models.tenant import Tenant  # noqa: F401
+from app.models.verify_file import VerifyFile  # noqa: F401
 from app.models.password_reset_code import PasswordResetCode  # noqa: F401
 from app.models.knowledge_base import KnowledgeBase  # noqa: F401
 from app.models.document import Document  # noqa: F401

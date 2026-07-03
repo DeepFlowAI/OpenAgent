@@ -5,13 +5,19 @@ import re
 import logging
 from typing import Any
 
-from sqlalchemy import select, func, and_, or_, text, cast, Float
+from sqlalchemy import select, func, and_, or_, text, cast, Float, literal_column
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.configs.settings import settings
 from app.models.slice import Slice
 from app.schemas.search import FilterNode
 
 logger = logging.getLogger(__name__)
+
+# Combined text target for the PGroonga keyword backend. MUST stay byte-identical
+# to the expression in the index DDL (see docs/搜索性能与准确性优化.md) so the
+# expression index is actually used.
+_PGROONGA_TARGET = "(coalesce(content, '') || ' ' || coalesce(content_for_search, ''))"
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +354,14 @@ class SearchRepository:
         limit: int = 10,
         offset: int = 0,
     ) -> tuple[list[dict], int]:
-        """BM25-style keyword search using ILIKE + JSONB filters."""
+        """BM25-style keyword search.
+
+        Two backends, selected by ``settings.KB_PGROONGA_ENABLED``:
+          * PGroonga (preferred): jieba-segmented query against the PGroonga
+            full-text index with ``scorer_tf_idf`` (TF-IDF) ranking — fast and
+            gives real weighted relevance for Chinese.
+          * ILIKE (default/fallback): substring match, correct but a full scan.
+        """
         conditions = [Slice.knowledge_base_id == kb_id]
 
         if doc_ids:
@@ -356,6 +369,11 @@ class SearchRepository:
 
         if filter_conditions:
             conditions.extend(filter_conditions)
+
+        if settings.KB_PGROONGA_ENABLED and query.strip():
+            return await SearchRepository._keyword_search_pgroonga(
+                db, conditions, query, limit, offset
+            )
 
         keywords = query.strip().split()
         if keywords:
@@ -401,6 +419,84 @@ class SearchRepository:
             })
 
         items.sort(key=lambda x: x["bm25_score"], reverse=True)
+        return items, total
+
+    @staticmethod
+    async def _keyword_search_pgroonga(
+        db: AsyncSession,
+        base_conditions: list,
+        query: str,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict], int]:
+        """Keyword search over the PGroonga full-text index with TF-IDF ranking.
+
+        The query is jieba-segmented into an OR of word phrases (PGroonga's
+        bigram tokenizer treats a continuous CJK string as a phrase, so OR-ing
+        words is what gives word-level recall). ``scorer_tf_idf`` then ranks the
+        matched rows by TF-IDF — rare/characteristic terms outweigh common ones —
+        and only the requested page is returned. Requires the pgroonga extension
+        and the expression index named by ``settings.KB_PGROONGA_INDEX_NAME`` on
+        ``_PGROONGA_TARGET`` (content + content_for_search combined).
+
+        NOTE: a single-column *expression* index is used rather than a two-column
+        ``ARRAY[content, content_for_search]`` index on purpose — the multi-column
+        form is not index-accelerated here (falls back to Seq Scan) and
+        ``pgroonga_score`` returns 0 for it. The combined expression keeps "search
+        both columns" while staying index-backed and scorable.
+        """
+        pgq = _build_pgroonga_query(query)
+        if not pgq:
+            return [], 0
+
+        # Matching is independent of scoring, so COUNT uses the plain &@~ query
+        # operator (cheaper) while the page query attaches the TF-IDF scorer. The
+        # match expression must stay byte-identical to the index DDL to be used.
+        match_count = text(
+            f"{_PGROONGA_TARGET} &@~ :pgq"
+        ).bindparams(pgq=pgq)
+        match_score = text(
+            f"{_PGROONGA_TARGET} &@~ pgroonga_condition("
+            ":pgq, "
+            "scorers => ARRAY['scorer_tf_idf($index)'], "
+            "index_name => :idx)"
+        ).bindparams(pgq=pgq, idx=settings.KB_PGROONGA_INDEX_NAME)
+        score_expr = literal_column("pgroonga_score(tableoid, ctid)").label("pgr_score")
+
+        total = (
+            await db.execute(
+                select(func.count())
+                .select_from(Slice)
+                .where(*base_conditions, match_count)
+            )
+        ).scalar_one()
+
+        if total == 0:
+            return [], 0
+
+        result = await db.execute(
+            select(Slice, score_expr)
+            .where(*base_conditions, match_score)
+            .order_by(score_expr.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+
+        items = []
+        for s, score in result:
+            items.append({
+                "slice_id": s.id,
+                "doc_id": s.document_id,
+                "content": s.content,
+                "toc_path": s.toc_path,
+                "toc_ancestors": s.toc_ancestors,
+                "slice_meta": s.slice_meta,
+                "doc_meta": s.doc_meta,
+                "source_url": s.source_url,
+                "markdown_url": s.markdown_url,
+                "bm25_score": float(score) if score is not None else 0.0,
+            })
+
         return items, total
 
     @staticmethod
@@ -475,6 +571,31 @@ class SearchRepository:
             })
 
         return items, total
+
+
+def _build_pgroonga_query(query: str) -> str:
+    """Segment a (CJK/mixed) query with jieba into a PGroonga OR query string.
+
+    PGroonga's default bigram tokenizer treats a continuous CJK string as a
+    phrase ("数据库索引" only matches that literal substring), so we segment into
+    words and OR them for word-level recall; ``scorer_tf_idf`` ranks afterwards.
+    Each token is wrapped in double quotes (phrase) to neutralize PGroonga query
+    operators (OR, spaces, parentheses, etc.) that might appear inside a token.
+    """
+    import jieba
+
+    seen: list[str] = []
+    for tok in jieba.cut(query):
+        # Strip embedded quotes so the phrase wrapper can't be broken out of.
+        tok = tok.replace('"', " ").strip()
+        if tok and tok not in seen:
+            seen.append(tok)
+
+    if not seen:
+        fallback = query.replace('"', " ").strip()
+        return f'"{fallback}"' if fallback else ""
+
+    return " OR ".join(f'"{tok}"' for tok in seen)
 
 
 def _compute_keyword_score(text_content: str, keywords: list[str]) -> float:

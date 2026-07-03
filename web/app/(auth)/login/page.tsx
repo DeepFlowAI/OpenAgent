@@ -1,9 +1,9 @@
 'use client'
 
-import { Suspense, useEffect, useState } from 'react'
+import { Suspense, useEffect, useRef, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
-import { useLogin } from '@/service/use-auth'
+import { useLogin, useSsoLogin } from '@/service/use-auth'
 import { useSystemInfo } from '@/service/use-system'
 import { useAuthStore } from '@/context/auth-store'
 import { getErrorMessage } from '@/service/base'
@@ -25,8 +25,10 @@ function LoginContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const loginMutation = useLogin()
+  const ssoLoginMutation = useSsoLogin()
   const setAuth = useAuthStore((s) => s.setAuth)
   const { data: systemInfo } = useSystemInfo()
+  const ssoHandledRef = useRef(false)
   // Default to false (= show field) when info unavailable — safer for users
   // who otherwise wouldn't see what to type.
   const singleTenantMode = systemInfo?.single_tenant_mode ?? false
@@ -48,6 +50,24 @@ function LoginContent() {
       setForm((prev) => ({ ...prev, tenant: systemInfo.default_tenant_id }))
     }
   }, [singleTenantMode, systemInfo])
+
+  useEffect(() => {
+    const ssoToken = searchParams.get('sso_token')
+    if (!ssoToken || ssoHandledRef.current) return
+    ssoHandledRef.current = true
+    setApiError('')
+    ssoLoginMutation.mutate(ssoToken, {
+      onSuccess: (res) => {
+        setAuth(res.user, res.token)
+        const redirect = searchParams.get('redirect')
+        router.push(redirect && redirect.startsWith('/') ? redirect : '/knowledge-space')
+      },
+      onError: async (err) => {
+        const msg = await getErrorMessage(err)
+        setApiError(msg)
+      },
+    })
+  }, [router, searchParams, setAuth, ssoLoginMutation])
 
   const updateField = (field: string, value: string) => {
     setForm((prev) => ({ ...prev, [field]: value }))

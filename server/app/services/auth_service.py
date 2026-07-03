@@ -7,8 +7,10 @@ import string
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
+import jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.configs.settings import settings
 from app.core.exceptions import (
     UnauthorizedError,
     NotFoundError,
@@ -21,7 +23,7 @@ from app.repositories.password_reset_repository import PasswordResetRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.repositories.super_admin_repository import SuperAdminRepository
 from app.libs.email import create_email_sender
-from app.schemas.auth import LoginRequest, SendCodeRequest, ResetPasswordRequest
+from app.schemas.auth import LoginRequest, SsoLoginRequest, SendCodeRequest, ResetPasswordRequest
 from app.schemas.super_admin import AdminLoginRequest
 from app.services.tenant_service import TenantService
 
@@ -57,6 +59,37 @@ EMAIL_TEMPLATES = {
 
 
 class AuthService:
+    @staticmethod
+    def _sso_secret() -> str:
+        return settings.TENANT_PLATFORM_SSO_SECRET or settings.TENANT_PLATFORM_API_KEY
+
+    @staticmethod
+    def _sso_audiences() -> set[str]:
+        return {
+            item.strip()
+            for item in settings.TENANT_PLATFORM_SSO_AUDIENCES.split(",")
+            if item.strip()
+        }
+
+    @staticmethod
+    def _decode_sso_token(token: str) -> dict:
+        secret = AuthService._sso_secret()
+        if not secret:
+            raise UnauthorizedError("SSO is not configured")
+        try:
+            payload = jwt.decode(
+                token,
+                secret,
+                algorithms=["HS256"],
+                options={"verify_aud": False},
+            )
+        except jwt.PyJWTError:
+            raise UnauthorizedError("Invalid or expired SSO token")
+        if payload.get("iss") != "tenant-platform" or payload.get("typ") != "tenant_sso":
+            raise UnauthorizedError("Invalid SSO token")
+        if payload.get("aud") not in AuthService._sso_audiences():
+            raise UnauthorizedError("Invalid SSO audience")
+        return payload
 
     @staticmethod
     async def login(db: AsyncSession, data: LoginRequest) -> dict:
@@ -75,6 +108,31 @@ class AuthService:
             tenant.admin_password_hash.encode("utf-8"),
         ):
             raise UnauthorizedError("Invalid tenant, account or password")
+
+        token = create_access_token(
+            {"sub": str(tenant.id), "tenant_id": tenant.tenant_id,
+             "username": tenant.admin_username, "role": "admin"}
+        )
+        return {
+            "token": token,
+            "user": {
+                "id": tenant.id,
+                "tenant_id": tenant.tenant_id,
+                "username": tenant.admin_username,
+                "role": "admin",
+            },
+        }
+
+    @staticmethod
+    async def sso_login(db: AsyncSession, data: SsoLoginRequest) -> dict:
+        """Exchange a Tenant Platform SSO token for a normal OpenAgent JWT."""
+        payload = AuthService._decode_sso_token(data.token)
+        tenant_identifier = str(payload.get("tenant_id") or payload.get("sub") or "")
+        tenant = await TenantService.resolve_identifier(db, tenant_identifier)
+        if not tenant:
+            raise UnauthorizedError("Invalid tenant")
+        if tenant.status != "enabled":
+            raise ForbiddenError("Tenant is disabled")
 
         token = create_access_token(
             {"sub": str(tenant.id), "tenant_id": tenant.tenant_id,

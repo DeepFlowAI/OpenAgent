@@ -10,6 +10,7 @@ from app.db.deps import get_db
 from app.schemas.auth import (
     LoginRequest,
     LoginResponse,
+    SsoLoginRequest,
     SendCodeRequest,
     ResetPasswordRequest,
     MessageResponse,
@@ -25,6 +26,12 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     """Authenticate user and return JWT token."""
     return await AuthService.login(db, body)
+
+
+@router.post("/sso", response_model=LoginResponse)
+async def sso_login(body: SsoLoginRequest, db: AsyncSession = Depends(get_db)):
+    """Exchange a Tenant Platform SSO token for a user session."""
+    return await AuthService.sso_login(db, body)
 
 
 @router.post("/admin-login", response_model=AdminLoginResponse)

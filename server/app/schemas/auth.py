@@ -10,6 +10,10 @@ class LoginRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=72)
 
 
+class SsoLoginRequest(BaseModel):
+    token: str = Field(..., min_length=1)
+
+
 class LoginResponse(BaseModel):
     token: str
     user: "LoginUserInfo"

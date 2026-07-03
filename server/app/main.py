@@ -7,6 +7,7 @@ from app.configs.logging import setup_logging
 from app.configs.settings import settings
 from app.core.exceptions import register_exception_handlers
 from app.db.migration import run_migrations
+from app.db.pgroonga import ensure_pgroonga_index
 from app.db.seed import seed_system_defaults
 from app.db.session import AsyncSessionLocal, engine, lock_engine
 from app.extensions import load_extensions
@@ -74,6 +75,7 @@ async def lifespan(app: FastAPI):
     async with AsyncSessionLocal() as db:
         await seed_system_defaults(db)
         await db.commit()
+        await ensure_pgroonga_index(db)
     if settings.REDIS_URL:
         from app.db.redis import redis_client
 

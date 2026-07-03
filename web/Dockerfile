@@ -48,7 +48,9 @@ COPY . .
 ARG APP_VERSION=dev
 ENV NEXT_PUBLIC_APP_VERSION=$APP_VERSION
 
-ENV APP_ENV=production \
+# Selects which web/.env.<APP_ENV> is baked into the client bundle at build time.
+ARG APP_ENV=production
+ENV APP_ENV=${APP_ENV} \
     NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1
 

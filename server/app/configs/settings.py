@@ -195,6 +195,14 @@ class Settings(BaseSettings):
     # Tenant Platform API Key — only used by the closed-source tenants
     # extension (multi-tenant builds). Open-source builds never read it.
     TENANT_PLATFORM_API_KEY: str = Field(default="")
+    TENANT_PLATFORM_SSO_SECRET: str = Field(
+        default="",
+        description="HS256 secret used to verify Tenant Platform SSO tokens. Falls back to TENANT_PLATFORM_API_KEY when empty.",
+    )
+    TENANT_PLATFORM_SSO_AUDIENCES: str = Field(
+        default="openagent,openagent-test",
+        description="Comma-separated accepted JWT audiences for Tenant Platform SSO.",
+    )
 
     # SiliconFlow API (Embedding & Reranker)
     SILICONFLOW_API_KEY: str = Field(default="")
@@ -210,6 +218,25 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSION: int = Field(default=1024, ge=64)
     EMBEDDING_BATCH_SIZE: int = Field(default=10, ge=1, le=25)
     EMBEDDING_BATCH_CONCURRENCY: int = Field(default=3, ge=1, le=8)
+
+    # ── Keyword search backend (BM25-style) ──
+    # When False (default) keyword/bm25 recall uses ILIKE substring matching —
+    # correct everywhere but a full table scan (no index) and no real ranking.
+    # When True it uses the PGroonga full-text index over slices.content /
+    # content_for_search with `scorer_tf_idf` (TF-IDF) relevance ranking — orders
+    # of magnitude faster and gives real weighted ranking for Chinese.
+    #
+    # When True, startup auto-creates the pgroonga extension + the keyword index
+    # if missing (idempotent; see app/db/pgroonga.py) — so a new deployment can't
+    # forget the DB-side setup. It logs and continues if the DB can't provide
+    # pgroonga (e.g. extension not whitelisted / no CREATE privilege), in which
+    # case keyword search will error until fixed. For a large EXISTING table,
+    # prefer creating the index manually with CONCURRENTLY first to avoid a
+    # blocking build at startup (see docs/搜索性能与准确性优化.md).
+    KB_PGROONGA_ENABLED: bool = Field(default=False)
+    # PGroonga index name; passed to pgroonga_condition(index_name => ...) so the
+    # scorer_tf_idf($index) placeholder resolves. Must match the created index.
+    KB_PGROONGA_INDEX_NAME: str = Field(default="ix_slices_content_pgroonga")
     ALIYUN_BAILIAN_RERANK_URL: str = Field(
         default="https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
     )
