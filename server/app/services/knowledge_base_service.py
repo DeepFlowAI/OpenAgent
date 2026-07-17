@@ -104,4 +104,9 @@ class KnowledgeBaseService:
         item = await KnowledgeBaseRepository.get_by_id(db, kb_id)
         if not item or item.status == "deleted":
             raise NotFoundError("Knowledge base not found")
+        from app.repositories.knowledge_base_qa_repository import (
+            KnowledgeBaseQaRepository,
+        )
+
+        await KnowledgeBaseQaRepository.delete_all_by_kb(db, kb_id)
         await KnowledgeBaseRepository.soft_delete(db, item)

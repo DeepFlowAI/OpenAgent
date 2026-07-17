@@ -6,6 +6,7 @@ import logging
 from sqlalchemy import select, func, delete, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.document import Document
 from app.models.slice import Slice
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,17 @@ class SliceRepository:
     async def delete_by_kb_id(db: AsyncSession, kb_id: int) -> int:
         result = await db.execute(
             delete(Slice).where(Slice.knowledge_base_id == kb_id)
+        )
+        return result.rowcount
+
+    @staticmethod
+    async def delete_git_by_kb_id(db: AsyncSession, kb_id: int) -> int:
+        git_doc_ids = select(Document.id).where(
+            Document.knowledge_base_id == kb_id,
+            Document.source_type == "git",
+        )
+        result = await db.execute(
+            delete(Slice).where(Slice.document_id.in_(git_doc_ids))
         )
         return result.rowcount
 

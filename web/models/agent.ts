@@ -85,6 +85,7 @@ export type EngineConfig = {
   selected_tool_ids: number[]
   context: ContextConfig
   pre_recall: PreRecallConfig
+  attachment_handoff_tool_id: number | null
   conversation_settings: ConversationSettingsConfig
 }
 
@@ -133,6 +134,7 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     enabled: false,
     tool_id: null,
   },
+  attachment_handoff_tool_id: null,
   conversation_settings: DEFAULT_CONVERSATION_SETTINGS,
 }
 

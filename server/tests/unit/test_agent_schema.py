@@ -349,6 +349,18 @@ class TestEngineConfigSystemPrompt:
 
 class TestEngineConfigUpdate:
 
+    def test_attachment_handoff_tool_defaults_to_none(self):
+        assert EngineConfig().attachment_handoff_tool_id is None
+
+    def test_attachment_handoff_tool_accepts_positive_id(self):
+        update = EngineConfigUpdate(attachment_handoff_tool_id=12)
+
+        assert update.attachment_handoff_tool_id == 12
+
+    def test_attachment_handoff_tool_rejects_non_positive_id(self):
+        with pytest.raises(ValidationError):
+            EngineConfigUpdate(attachment_handoff_tool_id=0)
+
     def test_conversation_settings_update_requires_complete_section_object(self):
         with pytest.raises(ValidationError):
             EngineConfigUpdate(

@@ -7,6 +7,7 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.repositories.agent_repository import AgentRepository
 from app.repositories.agent_tool_repository import AgentToolRepository
 from app.schemas.agent import AgentCreate, AgentUpdate, AgentStatusUpdate, EngineConfigUpdate, EngineConfig
+from app.schemas.agent_tool import HUMAN_HANDOFF_TOOL_TYPE
 
 
 class AgentService:
@@ -113,6 +114,18 @@ class AgentService:
         merged = {**defaults, **current_config}
 
         update_data = data.model_dump(exclude_unset=True)
+        attachment_tool_id = update_data.get("attachment_handoff_tool_id")
+        if attachment_tool_id is not None:
+            tool = await AgentToolRepository.get_by_id(db, attachment_tool_id)
+            if (
+                tool is None
+                or tool.agent_id != agent_id
+                or tool.tool_type != HUMAN_HANDOFF_TOOL_TYPE
+                or not tool.is_enabled
+            ):
+                raise ValidationError(
+                    "Attachment handoff tool must be an enabled human handoff tool for this agent"
+                )
         for key, value in update_data.items():
             if isinstance(value, dict) and isinstance(merged.get(key), dict):
                 merged[key] = {**merged[key], **value}

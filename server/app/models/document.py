@@ -3,7 +3,7 @@ Document ORM model
 """
 from datetime import datetime
 
-from sqlalchemy import String, Text, Integer, DateTime, Index, UniqueConstraint
+from sqlalchemy import CheckConstraint, String, Text, Integer, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,11 +26,21 @@ class Document(Base, TimestampMixin):
     toc: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     slice_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="git", server_default="git"
+    )
 
     __table_args__ = (
         Index("ix_documents_kb_id", "knowledge_base_id"),
         Index("ix_documents_tenant_id", "tenant_id"),
+        Index("ix_documents_kb_source_type", "knowledge_base_id", "source_type"),
         UniqueConstraint(
-            "knowledge_base_id", "file_path", name="uq_documents_kb_filepath"
+            "knowledge_base_id",
+            "source_type",
+            "file_path",
+            name="uq_documents_kb_source_filepath",
+        ),
+        CheckConstraint(
+            "source_type IN ('git', 'qa')", name="ck_documents_source_type"
         ),
     )

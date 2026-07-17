@@ -1,9 +1,10 @@
 """
 Chat request/response schemas for SSE streaming chat endpoint.
 """
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class CustomerContext(BaseModel):
@@ -21,9 +22,43 @@ class CustomerContext(BaseModel):
     metadata: dict | None = None
 
 
+class ChatAttachment(BaseModel):
+    """HTTPS attachment reference accepted by the Open API chat endpoint."""
+
+    type: Literal["image", "file"]
+    url: str = Field(..., min_length=1, max_length=2048)
+    name: str = Field(..., min_length=1, max_length=255)
+    mime_type: str = Field(..., min_length=1, max_length=128)
+    size: int = Field(..., gt=0)
+
+    @field_validator("url")
+    @classmethod
+    def _validate_https_url(cls, value: str) -> str:
+        if any(char.isspace() for char in value):
+            raise ValueError("attachment url must be an HTTPS URL")
+        parsed = urlsplit(value)
+        try:
+            hostname = parsed.hostname
+        except ValueError as exc:
+            raise ValueError("attachment url must be an HTTPS URL") from exc
+        if parsed.scheme.lower() != "https" or not parsed.netloc or not hostname:
+            raise ValueError("attachment url must be an HTTPS URL")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_mime_type(self) -> "ChatAttachment":
+        normalized = self.mime_type.lower()
+        if self.type == "image" and not normalized.startswith("image/"):
+            raise ValueError("image attachment mime_type must start with image/")
+        if self.type == "file" and normalized.startswith("image/"):
+            raise ValueError("file attachment mime_type must not be an image type")
+        return self
+
+
 class ChatRequest(BaseModel):
     """Request body for the chat SSE endpoint."""
-    message: str = Field(..., min_length=1, max_length=32000)
+    message: str | None = Field(None, max_length=32000)
+    attachments: list[ChatAttachment] = Field(default_factory=list, max_length=5)
     conversation_id: int | None = Field(
         None, description="Existing conversation ID. Null to create a new one."
     )
@@ -72,6 +107,12 @@ class ChatRequest(BaseModel):
         "fallback caused. If the buffer evicted the cursor's window, the "
         "server transparently falls back to step-replay.",
     )
+
+    @model_validator(mode="after")
+    def _validate_message_content(self) -> "ChatRequest":
+        if not (self.message or "").strip() and not self.attachments:
+            raise ValueError("message content cannot be empty")
+        return self
 
 
 class ChatCancelRequest(BaseModel):

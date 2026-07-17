@@ -71,6 +71,7 @@ async def _get_document(ctx: ToolContext, doc_id: int) -> Document | None:
         select(Document).where(
             Document.id == doc_id,
             Document.tenant_id == ctx.tenant_id,
+            Document.source_type == "git",
         )
     )
     return result.scalar_one_or_none()

@@ -8,13 +8,13 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import ForbiddenError, NotFoundError
 from app.core.trace import (
     set_conversation_external_id,
     set_request_id,
     set_trace_id,
 )
-from app.db.deps import get_db, require_scope
+from app.db.deps import AuthContext, get_db, resolve_auth
 from app.routers.v1.sse import with_sse_heartbeat
 from app.schemas.chat import ChatRequest
 from app.services.agent_engine_service import AgentEngineService
@@ -30,7 +30,7 @@ async def chat(
     agent_id: int,
     body: ChatRequest,
     request: Request,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(resolve_auth),
     db: AsyncSession = Depends(get_db),
 ):
     """SSE streaming chat with an agent.
@@ -38,8 +38,13 @@ async def chat(
     Creates a new conversation (or continues existing one) and streams
     thinking, content, tool calls, and the final response as SSE events.
     """
+    if auth.scopes is not None and "chat" not in auth.scopes:
+        raise ForbiddenError("API key lacks required scope: chat")
+    if body.attachments and auth.scopes is None:
+        raise ForbiddenError("Attachments are only supported with an API key")
+
     agent = await AgentService.get_by_id(db, agent_id)
-    if agent.tenant_id != tenant_id:
+    if agent.tenant_id != auth.tenant_id:
         raise NotFoundError("Agent not found")
 
     trace_id = set_trace_id()
@@ -51,13 +56,15 @@ async def chat(
         set_conversation_external_id(body.conversation_external_id)
     logger.info(
         "Chat request received — agent_id=%s, conversation_id=%s, "
-        "conversation_external_id=%s, request_id=%s, trace_id=%s, msg_len=%d",
+        "conversation_external_id=%s, request_id=%s, trace_id=%s, "
+        "msg_len=%d, attachment_count=%d",
         agent_id,
         body.conversation_id,
         body.conversation_external_id or "-",
         body.request_id or "-",
         trace_id,
-        len(body.message),
+        len(body.message or ""),
+        len(body.attachments),
     )
 
     async def event_generator():
@@ -65,7 +72,8 @@ async def chat(
             stream = AgentEngineService.run_chat_round(
                 db,
                 agent_id=agent_id,
-                user_message=body.message,
+                user_message=body.message or "",
+                attachments=[item.model_dump() for item in body.attachments],
                 conversation_id=body.conversation_id,
                 customer_context=body.customer_context.model_dump(exclude_none=True) if body.customer_context else None,
                 resume=body.resume,

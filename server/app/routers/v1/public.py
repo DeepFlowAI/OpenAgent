@@ -125,6 +125,8 @@ async def public_chat(
     channel = await ChannelService.get_by_token(db, token)
     if not channel.agent_id:
         raise NotFoundError("Channel has no agent bound")
+    if body.attachments:
+        raise ValidationError("Attachments are not supported by public chat channels")
 
     # The Redis detached backend keys its claim/stream/cancel state on
     # client_message_id; validate here (before the StreamingResponse) so a

@@ -5,10 +5,12 @@ import re
 import logging
 from typing import Any
 
-from sqlalchemy import select, func, and_, or_, text, cast, Float, literal_column
+from sqlalchemy import select, func, and_, or_, text, cast, Float, literal_column, exists
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.configs.settings import settings
+from app.models.document import Document
+from app.models.knowledge_base_qa import KnowledgeBaseQa
 from app.models.slice import Slice
 from app.schemas.search import FilterNode
 
@@ -18,6 +20,28 @@ logger = logging.getLogger(__name__)
 # to the expression in the index DDL (see docs/搜索性能与准确性优化.md) so the
 # expression index is actually used.
 _PGROONGA_TARGET = "(coalesce(content, '') || ' ' || coalesce(content_for_search, ''))"
+
+
+def _retrievable_source_condition():
+    """Include Git slices and only enabled, ready QA slices."""
+    return exists(
+        select(Document.id).where(
+            Document.id == Slice.document_id,
+            or_(
+                Document.source_type == "git",
+                and_(
+                    Document.source_type == "qa",
+                    exists(
+                        select(KnowledgeBaseQa.id).where(
+                            KnowledgeBaseQa.document_id == Document.id,
+                            KnowledgeBaseQa.enabled.is_(True),
+                            KnowledgeBaseQa.process_status == "ready",
+                        )
+                    ),
+                ),
+            ),
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +386,10 @@ class SearchRepository:
             gives real weighted relevance for Chinese.
           * ILIKE (default/fallback): substring match, correct but a full scan.
         """
-        conditions = [Slice.knowledge_base_id == kb_id]
+        conditions = [
+            Slice.knowledge_base_id == kb_id,
+            _retrievable_source_condition(),
+        ]
 
         if doc_ids:
             conditions.append(Slice.document_id.in_(doc_ids))
@@ -513,6 +540,7 @@ class SearchRepository:
         conditions = [
             Slice.knowledge_base_id == kb_id,
             Slice.embedding.isnot(None),
+            _retrievable_source_condition(),
         ]
 
         if doc_ids:

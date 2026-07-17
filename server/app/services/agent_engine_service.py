@@ -610,6 +610,7 @@ class AgentEngineService:
         is_disconnected_cb: IsDisconnectedCallback | None = None,
         client_message_id: str | None = None,
         last_event_id: str | None = None,
+        attachments: list[dict] | None = None,
     ) -> AsyncIterator[str]:
         """Public entry — wraps the engine body with a conversation span so
         the whole chat round (including any nested LLM and tool spans) shows
@@ -643,6 +644,7 @@ class AgentEngineService:
             "conversation.client_message_id": client_message_id or "",
             "conversation.last_event_id": last_event_id or "",
             "conversation.user_message_len": len(user_message or ""),
+            "conversation.attachment_count": len(attachments or []),
             "app.trace_id": get_trace_id(),
             "app.request_id": get_request_id(),
         }
@@ -664,6 +666,7 @@ class AgentEngineService:
                 is_disconnected_cb,
                 client_message_id,
                 last_event_id,
+                attachments,
             )
             try:
                 async for event in inner:
@@ -692,6 +695,7 @@ class AgentEngineService:
         is_disconnected_cb: IsDisconnectedCallback | None = None,
         client_message_id: str | None = None,
         last_event_id: str | None = None,
+        attachments: list[dict] | None = None,
     ) -> AsyncIterator[str]:
         """Execute a chat round and yield SSE-formatted events."""
         # Single SSE emitter for the whole round (sub-req 4). Frames before
@@ -719,6 +723,7 @@ class AgentEngineService:
 
         raw_cfg = agent.engine_config or {}
         config = EngineConfig(**{**EngineConfig().model_dump(), **raw_cfg})
+        attachment_snapshot = [dict(item) for item in attachments or []]
         max_tool_loop_rounds = _max_tool_loop_rounds(config)
         logger.info(
             "Engine config — model=%s, temperature=%.2f, thinking(first=%s/subsequent=%s), "
@@ -807,6 +812,11 @@ class AgentEngineService:
             logger.info(
                 "Conversation loaded — conv_id=%s, external_id=%s, rounds=%s",
                 conversation_id, conv.external_id, conv.round_count,
+            )
+
+        if attachment_snapshot and getattr(conv, "source", None) != "api":
+            raise ValidationError(
+                "Attachments are only supported for API conversations"
             )
 
         # Sub-req 3: round-level mutual exclusion + idempotency.
@@ -943,6 +953,8 @@ class AgentEngineService:
             resume_pending_tool_calls: list[dict] | None = None
             resume_pending_llm_step = None
             resume_processed_user_message: str | None = None
+            resume_handoff_failed_step = None
+            resume_handoff_event = None
             user_step = None
             last_llm_step_id: int | None = None
 
@@ -1056,6 +1068,14 @@ class AgentEngineService:
                             ):
                                 pending_external_tool_step = step
                                 continue
+                            if (
+                                step.tool_type == HUMAN_HANDOFF_TOOL_TYPE
+                                and step.status == "error"
+                                and (step.metadata_ or {}).get(
+                                    "attachment_auto_handoff"
+                                ) is True
+                            ):
+                                resume_handoff_failed_step = step
                             yield emitter.emit("tool_result", {
                                 "tool_call_id": step.tool_call_id,
                                 "result": (step.tool_response or "")[:500],
@@ -1065,6 +1085,9 @@ class AgentEngineService:
                                 "tool_call_id": step.tool_call_id,
                                 "content": step.tool_response or "",
                             })
+
+                        elif step.step_type == "human_handoff_event":
+                            resume_handoff_event = step
 
                         elif step.step_type == "assistant_message":
                             # Round already complete — just send done and return
@@ -1101,6 +1124,24 @@ class AgentEngineService:
                         )
                         return
 
+                    if resume_handoff_event is not None:
+                        yield emitter.emit("done", {
+                            "assistant_step_id": None,
+                            "final_content": "",
+                            "finish_reason": "handoff_success",
+                            "human_handoff_event_step_id": resume_handoff_event.id,
+                        })
+                        return
+
+                    if resume_handoff_failed_step is not None:
+                        yield emitter.emit("done", {
+                            "assistant_step_id": None,
+                            "final_content": "",
+                            "finish_reason": "handoff_failed",
+                            "tool_call_step_id": resume_handoff_failed_step.id,
+                        })
+                        return
+
                     # Check for pending (un-executed) tool calls from the last LLM step
                     if resume_pending_llm_step and resume_pending_llm_step.response_tool_calls:
                         executed_tc_ids = {
@@ -1131,27 +1172,91 @@ class AgentEngineService:
                     logger.info("Resume requested but no user step found — starting fresh")
                     resume = False
 
+            attachment_handoff_tool = None
+            if not resume and attachment_snapshot:
+                if config.attachment_handoff_tool_id is None:
+                    user_message = _normalize_attachment_message(
+                        user_message,
+                        attachment_snapshot,
+                    )
+                else:
+                    attachment_handoff_tool = await _load_attachment_handoff_tool(
+                        db,
+                        agent_id,
+                        agent.tenant_id,
+                        config.attachment_handoff_tool_id,
+                    )
+
             if not resume:
                 logger.info("Round %d begin", round_number)
                 # Save user_message step
+                user_step_metadata = (
+                    {"attachments": attachment_snapshot}
+                    if attachment_handoff_tool is not None
+                    else {}
+                )
                 user_step = await _create_step(db, conversation_id, agent.tenant_id, {
                     "round_number": round_number,
                     "step_type": "user_message",
-                    "content": user_message,
+                    "content": user_message or None,
                     # Sub-req 3: persist the idempotency key on the user_message
                     # step so a future retry with the same client_message_id can
                     # be auto-resumed by the lookup at the top of this function.
                     "client_message_id": client_message_id,
+                    "metadata": user_step_metadata,
                 })
                 logger.debug("User step saved — step_id=%s", user_step.id)
             else:
                 logger.info("Round %d resume", round_number)
 
             # Auto-set title from first user message
-            if not conv.title and user_message:
-                await ConversationRepository.update(
-                    db, conv, {"title": user_message[:200]}
+            if not conv.title and (user_message or attachment_snapshot):
+                title = user_message[:200] if user_message else _attachment_title(
+                    attachment_snapshot
                 )
+                await ConversationRepository.update(
+                    db, conv, {"title": title}
+                )
+
+            if attachment_handoff_tool is not None and user_step is not None:
+                tool_args = _attachment_handoff_arguments(
+                    user_message,
+                    attachment_snapshot,
+                )
+                tool_step = await _create_pending_human_handoff_tool_step(
+                    db,
+                    conversation_id,
+                    agent.tenant_id,
+                    round_number,
+                    tool_name=attachment_handoff_tool["name"],
+                    tool_call_id=f"attachment_handoff_{user_step.id}",
+                    tool_args=tool_args,
+                    brief=tool_args["brief"],
+                    tool_def=attachment_handoff_tool,
+                    parent_step_id=user_step.id,
+                )
+                await ConversationRepository.increment_counters(
+                    db,
+                    conversation_id,
+                    tool_call_count=1,
+                    round_count=1,
+                )
+                yield emitter.emit("tool_call", {
+                    "step_id": tool_step.id,
+                    "tool_name": tool_step.tool_name,
+                    "brief": tool_step.brief,
+                    "tool_call_id": tool_step.tool_call_id,
+                    "status": tool_step.status,
+                })
+                yield emitter.emit(
+                    "requires_action",
+                    _required_tool_result_action_payload(tool_step),
+                )
+                yield emitter.emit(
+                    "done",
+                    _done_waiting_for_tool_result_payload(tool_step),
+                )
+                return
 
             # Load tools
             conversation_source = getattr(conv, "source", "api")
@@ -2213,6 +2318,14 @@ class AgentEngineService:
                 })
                 return
 
+            if (updated_step.metadata_ or {}).get("attachment_auto_handoff") is True:
+                yield emitter.emit("done", {
+                    "assistant_step_id": None,
+                    "final_content": "",
+                    "finish_reason": "handoff_failed",
+                })
+                return
+
             if (conv.round_count or 0) != round_number:
                 logger.info(
                     "Skipping failed handoff continuation because newer rounds exist — "
@@ -2606,6 +2719,71 @@ def _done_waiting_for_tool_result_payload(tool_step) -> dict:
     }
 
 
+def _normalize_attachment_message(
+    user_message: str,
+    attachments: list[dict],
+) -> str:
+    """Append attachment URLs as plain text without adding type labels."""
+    parts = [user_message] if user_message else []
+    parts.extend(str(item["url"]) for item in attachments)
+    return "\n".join(parts)
+
+
+def _attachment_title(attachments: list[dict]) -> str:
+    """Build the first-round title for an attachment-only handoff."""
+    if any(item.get("type") == "file" for item in attachments):
+        return "文件消息"
+    return "图片消息"
+
+
+def _attachment_handoff_arguments(
+    user_message: str,
+    attachments: list[dict],
+) -> dict:
+    """Build fixed handoff arguments for a validated attachment message."""
+    arguments = {
+        "brief": "用户发送图片或文件，需要人工处理",
+        "reason": "用户消息包含图片或文件附件",
+        "attachments": [dict(item) for item in attachments],
+    }
+    if user_message:
+        arguments["user_message"] = user_message
+    return arguments
+
+
+async def _load_attachment_handoff_tool(
+    db: AsyncSession,
+    agent_id: int,
+    tenant_id: str,
+    tool_id: int,
+) -> dict:
+    """Resolve the configured handoff tool and reject unavailable states."""
+    tool = await AgentToolRepository.get_by_id(db, tool_id)
+    if (
+        tool is None
+        or tool.agent_id != agent_id
+        or tool.tenant_id != tenant_id
+        or tool.tool_type != HUMAN_HANDOFF_TOOL_TYPE
+        or not tool.is_enabled
+        or not await _human_handoff_is_in_service(
+            db,
+            tool.config or {},
+            tenant_id=tenant_id,
+        )
+    ):
+        raise ValidationError(
+            "当前无法处理图片或文件消息，请检查转人工工具设置"
+        )
+    return {
+        "id": tool.id,
+        "name": tool.name,
+        "description": tool.description or "",
+        "parameters_schema": _runtime_parameters_schema(tool),
+        "tool_type": tool.tool_type,
+        "config": tool.config or {},
+    }
+
+
 async def _create_pending_human_handoff_tool_step(
     db: AsyncSession,
     conversation_id: int,
@@ -2628,6 +2806,10 @@ async def _create_pending_human_handoff_tool_step(
         "tool_type": HUMAN_HANDOFF_TOOL_TYPE,
         "brief": brief,
     }
+    if "user_message" in tool_args:
+        action["user_message"] = tool_args["user_message"]
+    if "attachments" in tool_args:
+        action["attachments"] = [dict(item) for item in tool_args["attachments"]]
     tool_step = await _create_step(db, conversation_id, tenant_id, {
         "round_number": round_number,
         "step_type": "tool_call",
@@ -2642,6 +2824,7 @@ async def _create_pending_human_handoff_tool_step(
         "status": "pending",
         "metadata": {
             "requires_external_tool_result": True,
+            "attachment_auto_handoff": bool(tool_args.get("attachments")),
             "required_action": action,
             "tool_config": tool_config,
         },

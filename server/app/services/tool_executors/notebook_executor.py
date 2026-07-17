@@ -337,7 +337,11 @@ async def _resolve_doc_entry(
 
     result = await ctx.db.execute(
         select(Document)
-        .where(Document.id == parsed_doc_id, Document.tenant_id == ctx.tenant_id)
+        .where(
+            Document.id == parsed_doc_id,
+            Document.tenant_id == ctx.tenant_id,
+            Document.source_type == "git",
+        )
         .limit(1)
     )
     doc = result.scalar_one_or_none()

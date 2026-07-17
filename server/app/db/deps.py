@@ -1,4 +1,4 @@
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 
 import redis.asyncio as aioredis
@@ -25,6 +25,7 @@ class AuthContext:
     """Resolved authentication context."""
     tenant_id: str
     scopes: list[str] | None = None  # None = full access (JWT / legacy query)
+    role: str | None = None
 
 
 async def resolve_auth(
@@ -55,7 +56,11 @@ async def resolve_auth(
 
         try:
             payload = decode_access_token(token)
-            return AuthContext(tenant_id=str(payload["tenant_id"]), scopes=None)
+            return AuthContext(
+                tenant_id=str(payload["tenant_id"]),
+                scopes=None,
+                role=str(payload.get("role") or ""),
+            )
         except Exception:
             raise UnauthorizedError("Invalid token")
 
@@ -64,6 +69,35 @@ async def resolve_auth(
         return AuthContext(tenant_id=tenant_id, scopes=None)
 
     raise UnauthorizedError("Missing authentication")
+
+
+async def require_user_session(
+    request: Request,
+    auth: AuthContext = Depends(resolve_auth),
+) -> AuthContext:
+    """Require an authenticated user JWT instead of an API key or query fallback."""
+    from app.core.exceptions import ForbiddenError
+
+    authorization = request.headers.get("Authorization", "")
+    if (
+        not authorization.startswith("Bearer ")
+        or authorization.removeprefix("Bearer ").startswith("sk-")
+        or auth.scopes is not None
+        or not auth.role
+    ):
+        raise ForbiddenError("This operation requires an authenticated user session")
+    return auth
+
+
+async def require_admin_session(
+    auth: AuthContext = Depends(require_user_session),
+) -> AuthContext:
+    """Require a tenant administrator user session."""
+    from app.core.exceptions import ForbiddenError
+
+    if auth.role != "admin":
+        raise ForbiddenError("This operation requires knowledge-base management permission")
+    return auth
 
 
 def require_scope(scope: str):
@@ -77,6 +111,47 @@ def require_scope(scope: str):
         if auth.scopes is not None and scope not in auth.scopes:
             raise ForbiddenError(f"API key lacks required scope: {scope}")
         return auth.tenant_id
+    return _check
+
+
+def require_user_session_or_scope(
+    scope: str,
+) -> Callable[..., Awaitable[AuthContext]]:
+    """Allow an authenticated user session or an API key with ``scope``."""
+
+    async def _check(
+        request: Request,
+        auth: AuthContext = Depends(resolve_auth),
+    ) -> AuthContext:
+        if auth.scopes is not None:
+            from app.core.exceptions import ForbiddenError
+
+            if scope not in auth.scopes:
+                raise ForbiddenError(f"API key lacks required scope: {scope}")
+            return auth
+        return await require_user_session(request, auth)
+
+    return _check
+
+
+def require_admin_session_or_scope(
+    scope: str,
+) -> Callable[..., Awaitable[AuthContext]]:
+    """Allow an administrator session or an API key with ``scope``."""
+
+    async def _check(
+        request: Request,
+        auth: AuthContext = Depends(resolve_auth),
+    ) -> AuthContext:
+        if auth.scopes is not None:
+            from app.core.exceptions import ForbiddenError
+
+            if scope not in auth.scopes:
+                raise ForbiddenError(f"API key lacks required scope: {scope}")
+            return auth
+        user_auth = await require_user_session(request, auth)
+        return await require_admin_session(user_auth)
+
     return _check
 
 

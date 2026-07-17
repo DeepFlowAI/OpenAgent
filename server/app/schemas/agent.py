@@ -144,6 +144,7 @@ class EngineConfig(BaseModel):
     selected_tool_ids: list[int] = Field(default_factory=list)
     context: ContextConfig = Field(default_factory=ContextConfig)
     pre_recall: PreRecallConfig = Field(default_factory=PreRecallConfig)
+    attachment_handoff_tool_id: int | None = Field(default=None, ge=1)
     conversation_settings: ConversationSettingsConfig = Field(
         default_factory=ConversationSettingsConfig
     )
@@ -223,6 +224,7 @@ class EngineConfigUpdate(BaseModel):
     selected_tool_ids: list[int] | None = None
     context: ContextConfig | None = None
     pre_recall: PreRecallConfig | None = None
+    attachment_handoff_tool_id: int | None = Field(default=None, ge=1)
     conversation_settings: ConversationSettingsConfig | None = None
 
 

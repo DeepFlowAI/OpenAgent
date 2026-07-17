@@ -80,9 +80,13 @@ async def lifespan(app: FastAPI):
         from app.db.redis import redis_client
 
         await redis_client.initialize()
+    from app.services.knowledge_base_qa_service import KnowledgeBaseQaService
+
+    await KnowledgeBaseQaService.start_processing_recovery()
     try:
         yield
     finally:
+        await KnowledgeBaseQaService.shutdown_processing()
         if settings.REDIS_URL:
             from app.db.redis import redis_client
 

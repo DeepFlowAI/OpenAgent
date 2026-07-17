@@ -12,6 +12,7 @@ import { Button } from '@/app/components/base/button'
 import { Modal } from '@/app/components/base/modal'
 import { useToast } from '@/app/components/base/toast'
 import { MessagePreprocessingRuleModal } from '@/app/components/features/message-preprocessing-rule-modal'
+import { AttachmentHandoffSetting } from '@/app/components/features/attachment-handoff-setting'
 import type { AgentMessagePreprocessingRule } from '@/models/agent-message-preprocessing-rule'
 import { AGENT_MESSAGE_PREPROCESSING_ACTION_LABELS } from '@/models/agent-message-preprocessing-rule'
 import { getErrorMessage } from '@/service/base'
@@ -109,6 +110,8 @@ export default function PreprocessingPage() {
           </header>
 
           <div className="h-px bg-[#E4E4E7]" />
+
+          <AttachmentHandoffSetting agentId={agentId} />
 
           <section className="overflow-hidden rounded-[10px] border border-[#ECECEC] bg-white">
             <div className="flex items-center justify-end px-5 py-3">

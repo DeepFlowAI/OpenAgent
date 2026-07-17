@@ -23,6 +23,7 @@ import time
 from typing import AsyncIterator
 
 import litellm
+import openai
 
 from app.configs.settings import settings
 from app.libs.llm.base import (
@@ -194,6 +195,28 @@ PROVIDER_CHANNEL_NAMES: dict[str, str] = {
 _VALID_FINISH_REASONS: frozenset[str] = frozenset(
     {"stop", "tool_calls", "length", "content_filter"}
 )
+
+# ── Provider-channel fallback trigger ──
+# Every LiteLLM/OpenAI request error (BadRequestError incl. upstream
+# "Insufficient Balance", RateLimitError, ServiceUnavailableError,
+# InternalServerError, connection/timeout errors, ...) shares ``openai.APIError``
+# as its common base. NOTE: ``litellm.exceptions.APIError`` is only a *narrow
+# sibling* in that hierarchy — catching it alone silently skips channel fallback
+# for the most common provider outages (this is exactly why an upstream balance
+# error never failed over to Bailian). We fall back on the whole family EXCEPT
+# context-window overflow, which every channel of the same model rejects alike.
+_CHANNEL_FALLBACK_EXCEPTIONS = openai.APIError
+_NON_FALLBACK_EXCEPTIONS = (litellm.exceptions.ContextWindowExceededError,)
+
+# ── Degradation alerting (throttled) ──
+# A channel fallback is a *successful* degradation (WARN), but a persistently
+# unavailable paid channel (e.g. DeepSeek out of balance) still needs a human to
+# act (top up / fix upstream). We surface that as an actionable ERROR so it can
+# drive alerts — but throttled per (from_channel, reason) so a channel that fails
+# EVERY request doesn't storm one ERROR per round. State is per worker process;
+# at worst a few duplicate alerts across workers, which is acceptable.
+_FALLBACK_ALERT_COOLDOWN_SEC = 1800.0
+_last_fallback_alert: dict[tuple[str, str], float] = {}
 
 # Incomplete reasons surfaced to the engine via LLMStreamResult.incomplete_reason.
 # Keep them stable — they leak into OTel attributes and audit logs.
@@ -555,6 +578,28 @@ def _log_provider_fallback(
         },
     )
 
+    # Throttled ERROR so a degraded paid channel drives an alert (once per
+    # cooldown per channel+reason) without one-ERROR-per-round storms.
+    alert_key = (from_channel, reason)
+    now = time.monotonic()
+    last = _last_fallback_alert.get(alert_key)
+    if last is None or now - last >= _FALLBACK_ALERT_COOLDOWN_SEC:
+        _last_fallback_alert[alert_key] = now
+        logger.error(
+            "LLM channel degraded — %s unavailable, using fallback %s (model=%s, "
+            "reason=%s). Needs attention (e.g. top up / fix upstream). Alert "
+            "throttled to once per %.0fs per channel.%s",
+            from_channel, to_channel, model, reason, _FALLBACK_ALERT_COOLDOWN_SEC,
+            f" detail={detail[:_MAX_LOG_LEN]}" if detail else "",
+            extra={
+                "llm_channel_degraded": "1",
+                "degraded_channel": from_channel,
+                "degraded_to": to_channel,
+                "degraded_model": model,
+                "degraded_reason": reason,
+            },
+        )
+
 
 def _reliability_kwargs() -> dict:
     """LiteLLM kwargs for retries / timeout (env-driven)."""
@@ -661,8 +706,8 @@ class LiteLLMClient(BaseLLMClient):
                 response = await litellm.acompletion(**kwargs)
                 selected_channel = channel
                 break
-            except litellm.exceptions.APIError as exc:
-                if idx < len(candidates) - 1:
+            except _CHANNEL_FALLBACK_EXCEPTIONS as exc:
+                if not isinstance(exc, _NON_FALLBACK_EXCEPTIONS) and idx < len(candidates) - 1:
                     _log_provider_fallback(
                         model=model, from_channel=channel,
                         to_channel=candidates[idx + 1]["channel"],
@@ -797,8 +842,8 @@ class LiteLLMClient(BaseLLMClient):
                     return
                 except (asyncio.CancelledError, GeneratorExit):
                     raise
-                except litellm.exceptions.APIError as exc:
-                    if idx < len(candidates) - 1:
+                except _CHANNEL_FALLBACK_EXCEPTIONS as exc:
+                    if not isinstance(exc, _NON_FALLBACK_EXCEPTIONS) and idx < len(candidates) - 1:
                         _log_provider_fallback(
                             model=model, from_channel=channel,
                             to_channel=candidates[idx + 1]["channel"],

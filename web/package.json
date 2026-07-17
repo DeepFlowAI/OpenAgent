@@ -17,6 +17,7 @@
     "@uiw/react-markdown-preview": "^5.1.5",
     "class-variance-authority": "^0.7",
     "clsx": "^2",
+    "echarts": "^6.1.0",
     "ky": "^1",
     "next": "^15",
     "react": "^19",

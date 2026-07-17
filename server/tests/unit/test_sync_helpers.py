@@ -11,6 +11,7 @@ from app.services.sync_service import (
     _compute_schema_hash,
     _compute_content_hash,
     _classify_files,
+    _ensure_no_reserved_qa_paths,
 )
 
 
@@ -137,3 +138,17 @@ class TestClassifyFiles:
         assert modified == []
         assert unchanged == []
         assert sorted(deleted) == ["a.md", "b.md"]
+
+
+class TestReservedQaPaths:
+
+    def test_reserved_system_path_is_rejected(self):
+        with pytest.raises(ValueError, match="_open_agent_sys_qa_/"):
+            _ensure_no_reserved_qa_paths(
+                ["guide.md", "_open_agent_sys_qa_/123.md"]
+            )
+
+    def test_similar_nested_directory_is_allowed(self):
+        _ensure_no_reserved_qa_paths(
+            ["guide.md", "docs/_open_agent_sys_qa_/123.md"]
+        )

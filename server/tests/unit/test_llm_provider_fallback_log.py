@@ -48,3 +48,36 @@ def test_provider_fallback_log_truncates_long_detail(caplog):
 
     rec = next(r for r in caplog.records if "LLM provider fallback" in r.getMessage())
     assert len(rec.getMessage()) < 5000 + 200
+
+
+def test_degraded_channel_error_alert_is_throttled_then_refires(caplog, monkeypatch):
+    """A persistently-down paid channel must raise an actionable ERROR (for alerts)
+    at most once per cooldown window, not one ERROR per fallback/round."""
+    monkeypatch.setattr(litellm_client, "_last_fallback_alert", {})
+    fake_now = {"t": 1000.0}
+    monkeypatch.setattr(litellm_client.time, "monotonic", lambda: fake_now["t"])
+
+    def fire():
+        litellm_client._log_provider_fallback(
+            model="deepseek-v4-pro",
+            from_channel="deepseek-official",
+            to_channel="aliyun-bailian",
+            reason="api_error",
+            mode="stream",
+            detail="litellm.BadRequestError: OpenAIException - Insufficient Balance",
+        )
+
+    with caplog.at_level(logging.ERROR, logger=litellm_client.logger.name):
+        fire()  # first fallback in window -> ERROR fires
+        fire()  # still within cooldown -> throttled (no ERROR)
+        fake_now["t"] += litellm_client._FALLBACK_ALERT_COOLDOWN_SEC + 1
+        fire()  # cooldown elapsed -> ERROR fires again
+
+    errors = [
+        r for r in caplog.records
+        if r.levelno == logging.ERROR and "LLM channel degraded" in r.getMessage()
+    ]
+    assert len(errors) == 2
+    assert errors[0].llm_channel_degraded == "1"
+    assert errors[0].degraded_channel == "deepseek-official"
+    assert errors[0].degraded_reason == "api_error"

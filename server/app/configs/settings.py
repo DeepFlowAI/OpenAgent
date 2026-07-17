@@ -218,6 +218,14 @@ class Settings(BaseSettings):
     EMBEDDING_DIMENSION: int = Field(default=1024, ge=64)
     EMBEDDING_BATCH_SIZE: int = Field(default=10, ge=1, le=25)
     EMBEDDING_BATCH_CONCURRENCY: int = Field(default=3, ge=1, le=8)
+    # QA processing runs outside request sessions. Limit only the external
+    # embedding call; the effective global cap is this value multiplied by the
+    # number of API workers and replicas.
+    KB_QA_EMBEDDING_CONCURRENCY: int = Field(default=3, ge=1, le=32)
+    # A processing row older than this is considered orphaned and becomes
+    # retryable. The default safely exceeds the provider's 60-second timeout.
+    KB_QA_PROCESS_STALE_SECONDS: int = Field(default=600, ge=60)
+    KB_QA_RECOVERY_INTERVAL_SECONDS: int = Field(default=60, ge=5)
 
     # ── Keyword search backend (BM25-style) ──
     # When False (default) keyword/bm25 recall uses ILIKE substring matching —

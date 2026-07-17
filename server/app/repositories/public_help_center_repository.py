@@ -254,7 +254,8 @@ class PublicHelpCenterRepository:
         per_page: int,
     ) -> tuple[list[Document], int]:
         base = select(Document).where(
-            Document.knowledge_base_id == tab.knowledge_base_id
+            Document.knowledge_base_id == tab.knowledge_base_id,
+            Document.source_type == "git",
         )
         base = _apply_fixed_filters(base, tab.fixed_filters)
 
@@ -278,6 +279,7 @@ class PublicHelpCenterRepository:
         stmt = select(Document).where(
             Document.knowledge_base_id == tab.knowledge_base_id,
             Document.file_path == file_path,
+            Document.source_type == "git",
         )
         stmt = _apply_fixed_filters(stmt, tab.fixed_filters)
         result = await db.execute(stmt)
@@ -290,7 +292,8 @@ class PublicHelpCenterRepository:
         """Return ALL docs for a tab (no pagination) — sitemap consumer.
         Spec 0.9 allows up to 50k URLs; we don't paginate for now."""
         stmt = select(Document).where(
-            Document.knowledge_base_id == tab.knowledge_base_id
+            Document.knowledge_base_id == tab.knowledge_base_id,
+            Document.source_type == "git",
         )
         stmt = _apply_fixed_filters(stmt, tab.fixed_filters)
         stmt = stmt.order_by(Document.file_path.asc())

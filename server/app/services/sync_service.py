@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.configs.settings import settings
 from app.core.exceptions import ConflictError, NotFoundError
+from app.core.knowledge_paths import QA_SYSTEM_PATH_PREFIX
 from app.db import session as db_session
 from app.libs.git_sync.provider import GitSyncService
 from app.libs.doc_parser.parser import (
@@ -453,6 +454,25 @@ def _classify_files(
     return added, modified, unchanged, deleted
 
 
+def _ensure_no_reserved_qa_paths(markdown_files: list[str]) -> None:
+    """Reject Git documents stored under the QA system-owned namespace."""
+    conflicts = sorted(
+        path
+        for path in markdown_files
+        if path.replace("\\", "/").startswith(QA_SYSTEM_PATH_PREFIX)
+    )
+    if not conflicts:
+        return
+
+    preview = ", ".join(conflicts[:3])
+    if len(conflicts) > 3:
+        preview += f", ... (+{len(conflicts) - 3})"
+    raise ValueError(
+        f"Git repository must not contain Markdown files under reserved system "
+        f"path '{QA_SYSTEM_PATH_PREFIX}' (found: {preview})"
+    )
+
+
 # ---------------------------------------------------------------------------
 # SyncService
 # ---------------------------------------------------------------------------
@@ -651,6 +671,7 @@ class SyncService:
             reporter.schema_changed = schema_changed
 
             md_files = discover_markdown_files(repo_path)
+            _ensure_no_reserved_qa_paths(md_files)
             total_files = len(md_files)
             await reporter.publish(
                 phase="discovered",
@@ -811,7 +832,7 @@ class SyncService:
         reporter: SyncProgressReporter | None = None,
         sync_log_id: int | None = None,
     ) -> dict:
-        deleted_slices = await SliceRepository.delete_by_kb_id(db, kb.id)
+        deleted_slices = await SliceRepository.delete_git_by_kb_id(db, kb.id)
         deleted_docs = await DocumentRepository.delete_by_kb_id(db, kb.id)
         await db.commit()
         logger.info(

@@ -1,12 +1,17 @@
 from types import SimpleNamespace
 
+import litellm
 import pytest
 
+from app.libs.llm.base import LLMAPIError
 from app.libs.llm.providers import litellm_client
 
 
-class FakeAPIError(Exception):
-    status_code = 503
+def _provider_error(message: str = "upstream down") -> Exception:
+    """A realistic transient provider error that should trigger channel fallback."""
+    return litellm.exceptions.RateLimitError(
+        message=message, llm_provider="openai", model="minimax-m2.7"
+    )
 
 
 def _fake_response():
@@ -74,7 +79,6 @@ def minimax_fallback_env(monkeypatch):
     monkeypatch.setattr(litellm_client.settings, "MOONSHOT_API_KEY", "")
     monkeypatch.setattr(litellm_client.settings, "ZHIPU_API_KEY", "")
     monkeypatch.setattr(litellm_client.settings, "SILICONFLOW_API_KEY", "")
-    monkeypatch.setattr(litellm_client.litellm.exceptions, "APIError", FakeAPIError)
 
 
 @pytest.mark.asyncio
@@ -84,7 +88,7 @@ async def test_chat_falls_back_to_openrouter_after_minimax_official(monkeypatch,
     async def fake_acompletion(**kwargs):
         calls.append(kwargs)
         if len(calls) == 1:
-            raise FakeAPIError("openrouter down")
+            raise _provider_error("official down")
         return _fake_response()
 
     monkeypatch.setattr(litellm_client.litellm, "acompletion", fake_acompletion)
@@ -114,7 +118,7 @@ async def test_stream_falls_back_to_openrouter_after_minimax_official(monkeypatc
     async def fake_acompletion(**kwargs):
         calls.append(kwargs)
         if len(calls) == 1:
-            raise FakeAPIError("openrouter down")
+            raise _provider_error("official down")
         return _FakeStream()
 
     monkeypatch.setattr(litellm_client.litellm, "acompletion", fake_acompletion)
@@ -137,6 +141,80 @@ async def test_stream_falls_back_to_openrouter_after_minimax_official(monkeypatc
     ]
     assert calls[1]["stream"] is True
     assert calls[1]["stream_options"] == {"include_usage": True}
+
+
+@pytest.fixture
+def deepseek_fallback_env(monkeypatch):
+    """deepseek-v4-pro candidate chain: deepseek-official -> aliyun-bailian -> openrouter."""
+    monkeypatch.setattr(litellm_client.settings, "DEEPSEEK_API_KEY", "deepseek-key")
+    monkeypatch.setattr(litellm_client.settings, "DEEPSEEK_API_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setattr(litellm_client.settings, "ALIYUN_BAILIAN_API_KEY", "bailian-key")
+    monkeypatch.setattr(
+        litellm_client.settings, "ALIYUN_BAILIAN_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    monkeypatch.setattr(litellm_client.settings, "SILICONFLOW_API_KEY", "")
+    monkeypatch.setattr(litellm_client.settings, "OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setattr(litellm_client.settings, "LLM_PROVIDER_CHANNELS", "")
+
+
+@pytest.mark.asyncio
+async def test_stream_insufficient_balance_falls_back_to_bailian(monkeypatch, deepseek_fallback_env):
+    """Regression: an upstream "Insufficient Balance" BadRequestError must fail over
+    to the next channel instead of surfacing to the user (litellm.BadRequestError is
+    NOT a litellm.exceptions.APIError, so the old catch skipped fallback)."""
+    calls = []
+
+    async def fake_acompletion(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise litellm.exceptions.BadRequestError(
+                message="OpenAIException - Insufficient Balance",
+                model="deepseek-v4-pro",
+                llm_provider="openai",
+            )
+        return _FakeStream()
+
+    monkeypatch.setattr(litellm_client.litellm, "acompletion", fake_acompletion)
+
+    stream, result = await litellm_client.LiteLLMClient().stream_chat(
+        [{"role": "user", "content": "hello"}],
+        model="deepseek-v4-pro",
+    )
+    chunks = [delta async for delta in stream]
+
+    assert [chunk.content for chunk in chunks] == ["ok"]
+    assert result.provider_channel == "aliyun-bailian"
+    assert len(calls) == 2
+    assert calls[0]["api_key"] == "deepseek-key"
+    assert calls[1]["api_key"] == "bailian-key"
+
+
+@pytest.mark.asyncio
+async def test_stream_context_window_error_does_not_fall_back(monkeypatch, deepseek_fallback_env):
+    """Context-window overflow is request-shaped: every channel of the same model
+    rejects it identically, so we must surface it instead of burning other channels."""
+    calls = []
+
+    async def fake_acompletion(**kwargs):
+        calls.append(kwargs)
+        raise litellm.exceptions.ContextWindowExceededError(
+            message="context length exceeded",
+            model="deepseek-v4-pro",
+            llm_provider="openai",
+        )
+
+    monkeypatch.setattr(litellm_client.litellm, "acompletion", fake_acompletion)
+
+    stream, _ = await litellm_client.LiteLLMClient().stream_chat(
+        [{"role": "user", "content": "hello"}],
+        model="deepseek-v4-pro",
+    )
+    with pytest.raises(LLMAPIError) as excinfo:
+        [delta async for delta in stream]
+
+    assert excinfo.value.status_code == 400
+    assert len(calls) == 1  # did NOT try aliyun-bailian / openrouter
 
 
 def test_kimi_candidates_follow_domestic_provider_priority(monkeypatch):

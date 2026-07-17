@@ -1,12 +1,21 @@
 'use client'
 
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
+import { BarChart, LineChart } from 'echarts/charts'
+import {
+  GridComponent,
+  TooltipComponent,
+  type GridComponentOption,
+  type TooltipComponentOption,
+} from 'echarts/components'
+import { init, use, type ComposeOption, type EChartsType } from 'echarts/core'
+import { CanvasRenderer } from 'echarts/renderers'
+import type { BarSeriesOption, LineSeriesOption } from 'echarts/charts'
 
 import type {
   ReportGranularity,
   ReportTrendBucket,
 } from '@/models/conversation-report'
-import { cn } from '@/utils/classnames'
 
 import {
   METRIC_COLOR,
@@ -15,9 +24,11 @@ import {
   type VolumeMetric,
 } from '../_constants'
 
-const CHART_HEIGHT = 220
-const BAR_WIDTH = 10
-const BAR_GAP = 3
+use([BarChart, LineChart, GridComponent, TooltipComponent, CanvasRenderer])
+
+type ChartOption = ComposeOption<
+  BarSeriesOption | LineSeriesOption | GridComponentOption | TooltipComponentOption
+>
 
 type Props = {
   buckets: ReportTrendBucket[]
@@ -28,33 +39,27 @@ type Props = {
 }
 
 function formatTick(iso: string, granularity: ReportGranularity): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const mm = pad(d.getMonth() + 1)
-  const dd = pad(d.getDate())
-  const hh = pad(d.getHours())
-  const mi = pad(d.getMinutes())
-  switch (granularity) {
-    case 'half_hour':
-    case 'hour':
-      return `${hh}:${mi}`
-    case 'day':
-      return `${mm}-${dd}`
-    case 'month':
-      return `${d.getFullYear()}-${mm}`
-  }
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const month = pad(date.getMonth() + 1)
+  const day = pad(date.getDate())
+  const hour = pad(date.getHours())
+  const minute = pad(date.getMinutes())
+
+  if (granularity === 'half_hour' || granularity === 'hour') return `${hour}:${minute}`
+  if (granularity === 'day') return `${month}-${day}`
+  return `${date.getFullYear()}-${month}`
 }
 
 function niceMax(value: number): number {
   if (value <= 0) return 10
-  const power = Math.pow(10, Math.floor(Math.log10(value)))
-  const norm = value / power
-  let mult = 1
-  if (norm > 5) mult = 10
-  else if (norm > 2) mult = 5
-  else if (norm > 1) mult = 2
-  return mult * power
+  const power = 10 ** Math.floor(Math.log10(value))
+  const normalized = value / power
+  if (normalized > 5) return 10 * power
+  if (normalized > 2) return 5 * power
+  if (normalized > 1) return 2 * power
+  return power
 }
 
 export function TrendChart({
@@ -64,170 +69,120 @@ export function TrendChart({
   selectedRates,
   isLoading,
 }: Props) {
-  const { volumeMax, ticks } = useMemo(() => {
-    let max = 0
-    for (const b of buckets) {
-      for (const m of selectedVolumes) {
-        max = Math.max(max, b[m] ?? 0)
-      }
+  const containerRef = useRef<HTMLDivElement>(null)
+  const chartRef = useRef<EChartsType | null>(null)
+
+  const option = useMemo<ChartOption>(() => {
+    const volumeMax = niceMax(
+      Math.max(0, ...buckets.flatMap((bucket) => selectedVolumes.map((metric) => bucket[metric]))),
+    )
+    const hasVolumes = selectedVolumes.length > 0
+    const hasRates = selectedRates.length > 0
+
+    return {
+      animationDuration: 200,
+      grid: {
+        top: 8,
+        right: hasRates ? 48 : 12,
+        bottom: 30,
+        left: hasVolumes ? 44 : 12,
+        containLabel: false,
+      },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'shadow' },
+        backgroundColor: '#18181B',
+        borderWidth: 0,
+        padding: [8, 10],
+        textStyle: { color: '#FFFFFF', fontSize: 12 },
+      },
+      xAxis: {
+        type: 'category',
+        data: buckets.map((bucket) => formatTick(bucket.ts, granularity)),
+        axisLine: { lineStyle: { color: '#E4E4E7' } },
+        axisTick: { show: false },
+        axisLabel: { color: '#A1A1AA', fontSize: 11, interval: 0 },
+      },
+      yAxis: [
+        {
+          type: 'value',
+          show: hasVolumes,
+          min: 0,
+          max: volumeMax,
+          minInterval: 1,
+          splitNumber: volumeMax <= 5 ? volumeMax : 4,
+          axisLabel: { color: '#A1A1AA', fontSize: 11 },
+          splitLine: { lineStyle: { color: '#F4F4F5' } },
+        },
+        {
+          type: 'value',
+          show: hasRates,
+          min: 0,
+          max: 100,
+          interval: 25,
+          axisLabel: { color: '#A1A1AA', fontSize: 11, formatter: '{value}%' },
+          splitLine: { show: false },
+        },
+      ],
+      series: [
+        ...selectedVolumes.map<BarSeriesOption>((metric) => ({
+          name: METRIC_LABEL[metric],
+          type: 'bar',
+          data: buckets.map((bucket) => bucket[metric]),
+          barMaxWidth: 10,
+          itemStyle: { color: METRIC_COLOR[metric], borderRadius: [2, 2, 0, 0] },
+          emphasis: { focus: 'series' },
+        })),
+        ...selectedRates.map<LineSeriesOption>((metric) => ({
+          name: METRIC_LABEL[metric],
+          type: 'line',
+          yAxisIndex: 1,
+          data: buckets.map((bucket) => bucket[metric]),
+          connectNulls: false,
+          showSymbol: true,
+          symbolSize: 5,
+          lineStyle: { color: METRIC_COLOR[metric], width: 2 },
+          itemStyle: { color: METRIC_COLOR[metric] },
+          emphasis: { focus: 'series' },
+        })),
+      ],
     }
-    const top = niceMax(max)
-    const ticks = [0, 1, 2, 3, 4].map((i) => Math.round((top / 4) * (4 - i)))
-    return { volumeMax: top, ticks }
-  }, [buckets, selectedVolumes])
+  }, [buckets, granularity, selectedRates, selectedVolumes])
 
-  if (isLoading) {
-    return (
-      <div className="flex w-full animate-pulse items-end gap-1" style={{ height: CHART_HEIGHT }}>
-        <div className="h-full w-full rounded bg-[#F4F4F5]" />
-      </div>
-    )
-  }
+  useEffect(() => {
+    if (!containerRef.current) return
+    const chart = init(containerRef.current)
+    const observer = new ResizeObserver(() => chart.resize())
+    observer.observe(containerRef.current)
+    chartRef.current = chart
 
-  if (buckets.length === 0) {
-    return (
-      <div
-        className="flex items-center justify-center text-sm text-[#A1A1AA]"
-        style={{ height: CHART_HEIGHT }}
-      >
-        当前条件下暂无数据
-      </div>
-    )
-  }
+    return () => {
+      observer.disconnect()
+      chart.dispose()
+      chartRef.current = null
+    }
+  }, [])
 
-  const hasRate = selectedRates.length > 0
-  const showVolume = selectedVolumes.length > 0
-
-  // Polyline points for each rate series
-  const linesData = selectedRates.map((metric) => {
-    const segments: string[][] = []
-    let current: string[] = []
-    buckets.forEach((b, i) => {
-      const v = b[metric]
-      if (v === null || v === undefined) {
-        if (current.length) {
-          segments.push(current)
-          current = []
-        }
-        return
-      }
-      const xPct = ((i + 0.5) / buckets.length) * 100
-      const yPct = 100 - Math.min(100, Math.max(0, v))
-      current.push(`${xPct},${yPct}`)
-    })
-    if (current.length) segments.push(current)
-    return { metric, segments }
-  })
+  useEffect(() => {
+    if (!chartRef.current) return
+    if (isLoading || buckets.length === 0) {
+      chartRef.current.clear()
+      return
+    }
+    chartRef.current.setOption(option, { notMerge: true })
+  }, [buckets.length, isLoading, option])
 
   return (
-    <div className="flex w-full gap-2">
-        {/* Left Y axis */}
-        {showVolume ? (
-          <div
-            className="flex flex-col justify-between text-[11px] text-[#A1A1AA]"
-            style={{ height: CHART_HEIGHT, minWidth: 32 }}
-          >
-            {ticks.map((t, idx) => (
-              <span key={idx} className="leading-none">
-                {t.toLocaleString('en-US')}
-              </span>
-            ))}
-          </div>
-        ) : null}
-
-        {/* Chart body */}
-        <div className="relative flex-1">
-          {/* Grid baseline */}
-          <div
-            className="relative w-full overflow-hidden"
-            style={{ height: CHART_HEIGHT }}
-          >
-            {/* Horizontal grid lines */}
-            <div className="absolute inset-0 flex flex-col justify-between">
-              {ticks.map((_, idx) => (
-                <div
-                  key={idx}
-                  className={cn('h-px w-full', idx === ticks.length - 1 ? 'bg-[#E4E4E7]' : 'bg-[#F4F4F5]')}
-                />
-              ))}
-            </div>
-
-            {/* Bars row */}
-            <div
-              className="absolute inset-0 flex items-end justify-between px-1"
-            >
-              {buckets.map((b, i) => (
-                <div key={i} className="flex items-end" style={{ gap: BAR_GAP }}>
-                  {selectedVolumes.map((m) => {
-                    const v = b[m] ?? 0
-                    const h = volumeMax > 0 ? (v / volumeMax) * CHART_HEIGHT : 0
-                    return (
-                      <div
-                        key={m}
-                        title={`${METRIC_LABEL[m]}: ${v}`}
-                        className="rounded-t-[2px]"
-                        style={{
-                          width: BAR_WIDTH,
-                          height: h,
-                          backgroundColor: METRIC_COLOR[m],
-                        }}
-                      />
-                    )
-                  })}
-                </div>
-              ))}
-            </div>
-
-            {/* Line overlay */}
-            {hasRate ? (
-              <svg
-                viewBox="0 0 100 100"
-                preserveAspectRatio="none"
-                className="pointer-events-none absolute inset-0 h-full w-full"
-              >
-                {linesData.map(({ metric, segments }) =>
-                  segments.map((pts, idx) => (
-                    <polyline
-                      key={`${metric}-${idx}`}
-                      points={pts.join(' ')}
-                      fill="none"
-                      stroke={METRIC_COLOR[metric]}
-                      strokeWidth="0.6"
-                      vectorEffect="non-scaling-stroke"
-                    />
-                  )),
-                )}
-              </svg>
-            ) : null}
-          </div>
-
-          {/* X axis labels */}
-          <div className="mt-1 flex w-full items-start justify-between px-1 text-[11px] text-[#A1A1AA]">
-            {buckets.map((b, i) => (
-              <span
-                key={i}
-                className="text-center"
-                style={{ minWidth: 0, flex: 1 }}
-              >
-                {formatTick(b.ts, granularity)}
-              </span>
-            ))}
-          </div>
+    <div className="relative h-[248px] w-full">
+      <div ref={containerRef} className="h-full w-full" />
+      {isLoading ? (
+        <div className="absolute inset-0 animate-pulse rounded bg-[#F4F4F5]" />
+      ) : null}
+      {!isLoading && buckets.length === 0 ? (
+        <div className="absolute inset-0 flex items-center justify-center text-sm text-[#A1A1AA]">
+          当前条件下暂无数据
         </div>
-
-        {/* Right Y axis (rates) */}
-        {hasRate ? (
-          <div
-            className="flex flex-col justify-between text-[11px] text-[#F97316]"
-            style={{ height: CHART_HEIGHT, minWidth: 32 }}
-          >
-            {[100, 75, 50, 25, 0].map((p) => (
-              <span key={p} className="leading-none">
-                {p}%
-              </span>
-            ))}
-          </div>
-        ) : null}
-      </div>
+      ) : null}
+    </div>
   )
 }

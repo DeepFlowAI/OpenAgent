@@ -2,7 +2,7 @@
 
 import { use, useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { cn } from '@/utils/classnames'
 import { Button } from '@/app/components/base/button'
 import { useToast } from '@/app/components/base/toast'
@@ -21,8 +21,10 @@ import { knowledgeBaseKeys } from '@/service/use-knowledge-base'
 import { useQueryClient } from '@tanstack/react-query'
 import { IconArrowLeft, IconRefresh, IconChevronDown, IconPlayerStop } from '@tabler/icons-react'
 import { PermissionRulesTab } from '@/app/components/features/permission-rules-tab'
+import { KnowledgeBaseQaTab } from '@/app/components/features/knowledge-base-qa-tab'
 
 const tabs = [
+  { key: 'qa', label: 'QA' },
   { key: 'documents', label: '文档列表' },
   { key: 'sync', label: '同步与解析' },
   { key: 'config', label: '配置概览' },
@@ -38,6 +40,8 @@ export default function KnowledgeBaseDetailPage({
 }) {
   const { id } = use(params)
   const kbId = Number(id)
+  const router = useRouter()
+  const searchParams = useSearchParams()
   const [activeTab, setActiveTab] = useState<TabKey>('documents')
   const [syncDropdownOpen, setSyncDropdownOpen] = useState(false)
   const syncDropdownRef = useRef<HTMLDivElement>(null)
@@ -52,6 +56,18 @@ export default function KnowledgeBaseDetailPage({
   const hasRunningSync = !!runningLog
   const syncDisabled = syncMutation.isPending || hasRunningSync
   const trackedRunningSyncRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    const tab = searchParams.get('tab')
+    setActiveTab(tabs.some((item) => item.key === tab) ? tab as TabKey : 'documents')
+  }, [searchParams])
+
+  const selectTab = useCallback((tab: TabKey) => {
+    setActiveTab(tab)
+    const params = new URLSearchParams(searchParams.toString())
+    params.set('tab', tab)
+    router.replace(`/knowledge-space/${kbId}?${params.toString()}`, { scroll: false })
+  }, [kbId, router, searchParams])
 
   useEffect(() => {
     if (!hasRunningSync) {
@@ -238,7 +254,7 @@ export default function KnowledgeBaseDetailPage({
           {tabs.map((tab) => (
             <button
               key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
+              onClick={() => selectTab(tab.key)}
               className={cn(
                 'border-b-2 pb-2 text-sm font-medium transition-colors',
                 activeTab === tab.key
@@ -253,6 +269,7 @@ export default function KnowledgeBaseDetailPage({
       </div>
 
       <div className="flex-1 overflow-auto p-8">
+        {activeTab === 'qa' && <KnowledgeBaseQaTab kbId={kbId} />}
         {activeTab === 'documents' && (
           <DocumentsTab kbId={kbId} formatDate={formatDate} />
         )}

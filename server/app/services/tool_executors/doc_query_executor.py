@@ -57,7 +57,10 @@ async def _query_documents(
     limit: int,
 ) -> list[Document]:
     """Query documents with optional keyword search + structured filters."""
-    stmt = select(Document).where(Document.knowledge_base_id == kb_id)
+    stmt = select(Document).where(
+        Document.knowledge_base_id == kb_id,
+        Document.source_type == "git",
+    )
 
     for fc in fixed_filters:
         if fc.get("level", "doc_meta") in ("doc_meta", "doc-meta"):

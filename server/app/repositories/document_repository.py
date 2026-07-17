@@ -16,7 +16,13 @@ class DocumentRepository:
 
     @staticmethod
     async def get_by_id(db: AsyncSession, doc_id: int) -> Document | None:
-        return await db.get(Document, doc_id)
+        result = await db.execute(
+            select(Document).where(
+                Document.id == doc_id,
+                Document.source_type == "git",
+            )
+        )
+        return result.scalar_one_or_none()
 
     @staticmethod
     async def get_by_id_for_tenant(
@@ -28,6 +34,7 @@ class DocumentRepository:
             select(Document).where(
                 Document.id == doc_id,
                 Document.tenant_id == tenant_id,
+                Document.source_type == "git",
             )
         )
         return result.scalar_one_or_none()
@@ -40,6 +47,7 @@ class DocumentRepository:
             select(Document).where(
                 Document.knowledge_base_id == kb_id,
                 Document.file_path == file_path,
+                Document.source_type == "git",
             )
         )
         return result.scalar_one_or_none()
@@ -52,7 +60,10 @@ class DocumentRepository:
         per_page: int = 20,
         nav_config: list | None = None,
     ) -> tuple[list[Document], int]:
-        base_filter = (Document.knowledge_base_id == kb_id,)
+        base_filter = (
+            Document.knowledge_base_id == kb_id,
+            Document.source_type == "git",
+        )
 
         total_result = await db.execute(
             select(func.count()).select_from(Document).where(*base_filter)
@@ -107,7 +118,10 @@ class DocumentRepository:
         """Return {file_path: (doc_id, content_hash)} for all docs in a KB."""
         result = await db.execute(
             select(Document.id, Document.file_path, Document.content_hash)
-            .where(Document.knowledge_base_id == kb_id)
+            .where(
+                Document.knowledge_base_id == kb_id,
+                Document.source_type == "git",
+            )
         )
         return {row.file_path: (row.id, row.content_hash) for row in result}
 
@@ -121,20 +135,31 @@ class DocumentRepository:
 
     @staticmethod
     async def delete_by_id(db: AsyncSession, doc_id: int) -> None:
-        await db.execute(delete(Document).where(Document.id == doc_id))
+        await db.execute(
+            delete(Document).where(
+                Document.id == doc_id,
+                Document.source_type == "git",
+            )
+        )
 
     @staticmethod
     async def count_by_kb(db: AsyncSession, kb_id: int) -> int:
         result = await db.execute(
             select(func.count())
             .select_from(Document)
-            .where(Document.knowledge_base_id == kb_id)
+            .where(
+                Document.knowledge_base_id == kb_id,
+                Document.source_type == "git",
+            )
         )
         return int(result.scalar_one())
 
     @staticmethod
     async def delete_by_kb_id(db: AsyncSession, kb_id: int) -> int:
         result = await db.execute(
-            delete(Document).where(Document.knowledge_base_id == kb_id)
+            delete(Document).where(
+                Document.knowledge_base_id == kb_id,
+                Document.source_type == "git",
+            )
         )
         return result.rowcount

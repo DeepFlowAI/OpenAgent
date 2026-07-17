@@ -214,6 +214,14 @@ class ConversationStepService:
         if not step:
             raise NotFoundError("Tool call not found")
         if step.status not in {"pending", "running"}:
+            if (
+                step.tool_type == HUMAN_HANDOFF_TOOL_TYPE
+                and (
+                    (step.status == "success" and data.status == "handoff_success")
+                    or (step.status == "error" and data.status == "handoff_failed")
+                )
+            ):
+                return step
             raise ValidationError("Tool result can only be submitted for pending tool calls")
 
         event_tool_config = {}

@@ -40,6 +40,14 @@ async def create_human_handoff_event_step(
         "requested_at": requested_at,
         "handoff": handoff,
     }
+    attachments = tool_args.get("attachments")
+    if isinstance(attachments, list):
+        payload["attachments"] = [
+            dict(item) for item in attachments if isinstance(item, dict)
+        ]
+    user_message = tool_args.get("user_message")
+    if isinstance(user_message, str) and user_message:
+        payload["user_message"] = user_message
     max_order = await ConversationStepRepository.get_max_step_order(db, conv.id)
     return await ConversationStepRepository.create(
         db,
