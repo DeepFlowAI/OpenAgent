@@ -1,7 +1,7 @@
 """
 Agent repository
 """
-from sqlalchemy import select, func
+from sqlalchemy import false, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent import Agent
@@ -32,11 +32,16 @@ class AgentRepository:
         status: str = "active",
         page: int = 1,
         per_page: int = 10,
+        allowed_ids: list[int] | None = None,
     ) -> tuple[list[Agent], int]:
-        base_filter = (
+        base_filter: list = [
             Agent.tenant_id == tenant_id,
             Agent.status == status,
-        )
+        ]
+        if allowed_ids is not None:
+            base_filter.append(
+                Agent.id.in_(allowed_ids) if allowed_ids else false()
+            )
 
         total_result = await db.execute(
             select(func.count()).select_from(Agent).where(*base_filter)

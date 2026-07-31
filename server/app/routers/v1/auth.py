@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import UnauthorizedError
 from app.core.security import decode_access_token
-from app.db.deps import get_db
+from app.db.deps import AuthContext, get_db, require_user_session
 from app.schemas.auth import (
     LoginRequest,
     LoginResponse,
@@ -60,20 +60,16 @@ async def reset_password(
 
 
 @router.get("/me", response_model=MeResponse)
-async def get_current_user(request: Request):
+async def get_current_user(
+    auth: AuthContext = Depends(require_user_session),
+):
     """Return the current authenticated user from JWT."""
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise UnauthorizedError("Missing or invalid authorization header")
-
-    token = auth_header.split(" ", 1)[1]
-    payload = decode_access_token(token)
-
     return MeResponse(
-        id=int(payload["sub"]),
-        tenant_id=payload["tenant_id"],
-        username=payload["username"],
-        role=payload["role"],
+        id=auth.account_id or 0,
+        tenant_id=auth.tenant_id,
+        username=auth.username or "",
+        email=auth.email,
+        role=auth.role or "",
     )
 
 

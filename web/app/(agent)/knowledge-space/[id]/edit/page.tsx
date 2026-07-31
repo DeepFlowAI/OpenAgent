@@ -4,6 +4,7 @@ import { use } from 'react'
 import { useAuthStore } from '@/context/auth-store'
 import { useKnowledgeBase } from '@/service/use-knowledge-base'
 import { KnowledgeBaseForm } from '@/app/components/features/knowledge-base-form'
+import { ForbiddenState } from '@/app/components/base/forbidden-state'
 
 export default function EditKnowledgeBasePage({
   params,
@@ -12,7 +13,18 @@ export default function EditKnowledgeBasePage({
 }) {
   const { id } = use(params)
   const tenantId = useAuthStore((s) => s.user?.tenant_id) || ''
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
   const { data: knowledgeBase, isLoading } = useKnowledgeBase(Number(id))
+
+  if (!isAdmin) {
+    return (
+      <ForbiddenState
+        returnHref={`/knowledge-space/${id}`}
+        returnLabel="返回知识库"
+        returnLabelEn="Back to knowledge base"
+      />
+    )
+  }
 
   if (isLoading) {
     return (

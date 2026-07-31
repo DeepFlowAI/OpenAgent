@@ -4,8 +4,15 @@ Agent router
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundError
-from app.db.deps import get_db, require_scope
+from app.core.exceptions import ForbiddenError, NotFoundError
+from app.db.deps import (
+    AuthContext,
+    get_db,
+    require_agent_access,
+    require_scope,
+    resolve_auth,
+)
+from app.repositories.account_repository import AccountRepository
 from app.schemas.agent import (
     AgentCreate,
     AgentUpdate,
@@ -21,15 +28,27 @@ router = APIRouter(prefix="/agents", tags=["Agents"])
 
 @router.get("", response_model=AgentListResponse)
 async def list_agents(
-    tenant_id: str = Depends(require_scope("config")),
+    auth: AuthContext = Depends(resolve_auth),
     status_filter: str = "active",
     page: int = 1,
     per_page: int = 10,
     db: AsyncSession = Depends(get_db),
 ):
     """List agents for a tenant, filtered by status"""
+    if auth.scopes is not None and "config" not in auth.scopes:
+        raise ForbiddenError("API key lacks required scope: config")
+    allowed_ids = None
+    if auth.role == "quality_inspector":
+        if auth.account_id is None:
+            raise ForbiddenError("You do not have access to Agents")
+        allowed_ids = await AccountRepository.get_agent_ids(db, auth.account_id)
     return await AgentService.get_paginated(
-        db, tenant_id, status=status_filter, page=page, per_page=per_page
+        db,
+        auth.tenant_id,
+        status=status_filter,
+        page=page,
+        per_page=per_page,
+        allowed_ids=allowed_ids,
     )
 
 
@@ -49,12 +68,12 @@ async def create_agent(
 @router.get("/{agent_id}", response_model=AgentResponse)
 async def get_agent(
     agent_id: int,
-    tenant_id: str = Depends(require_scope("config")),
+    auth: AuthContext = Depends(require_agent_access("config")),
     db: AsyncSession = Depends(get_db),
 ):
     """Get agent by ID"""
     agent = await AgentService.get_by_id(db, agent_id)
-    if agent.tenant_id != tenant_id:
+    if agent.tenant_id != auth.tenant_id:
         raise NotFoundError("Agent not found")
     return agent
 

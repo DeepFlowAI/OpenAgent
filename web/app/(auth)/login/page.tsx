@@ -156,7 +156,7 @@ function LoginContent() {
           value={form.username}
           onChange={(e) => updateField('username', e.target.value)}
           error={errors.username}
-          placeholder="请输入账号"
+          placeholder="请输入用户名或邮箱"
           maxLength={64}
         />
 

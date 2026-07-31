@@ -4,7 +4,10 @@ import type { ReactNode } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/utils/classnames'
-import { IconKey, IconBroadcast, IconBook2, IconCalendarClock } from '@tabler/icons-react'
+import { IconKey, IconBroadcast, IconBook2, IconCalendarClock, IconUsers } from '@tabler/icons-react'
+import { ForbiddenState } from '@/app/components/base/forbidden-state'
+import { useAuthStore } from '@/context/auth-store'
+import { useAccountCopy } from '@/app/components/features/account-copy'
 
 const secondNavItems = [
   {
@@ -27,16 +30,42 @@ const secondNavItems = [
     href: '/system/help-centers',
     icon: IconBook2,
   },
+  {
+    label: '账号管理',
+    href: '/system/accounts',
+    icon: IconUsers,
+  },
 ]
 
 export default function SystemLayout({ children }: { children: ReactNode }) {
   const pathname = usePathname()
+  const role = useAuthStore((state) => state.user?.role)
+  const copy = useAccountCopy()
+  const labels: Record<string, string> = {
+    '/system/api-keys': copy.apiKeys,
+    '/system/channels': copy.channels,
+    '/system/service-hours': copy.serviceHours,
+    '/system/help-centers': copy.helpCenter,
+    '/system/accounts': copy.nav,
+  }
+
+  if (role && role !== 'admin') {
+    return (
+      <ForbiddenState
+        returnHref="/agent/agents"
+        returnLabel="返回 Agent 列表"
+        returnLabelEn="Back to Agents"
+      />
+    )
+  }
 
   return (
     <div className="flex h-full">
       <aside className="flex w-[200px] flex-col border-r border-[#ECECEC] bg-[#FAFAFA] px-4 py-6">
         <div className="px-2 pb-2">
-          <span className="text-sm font-semibold text-[#18181B]">系统管理</span>
+          <span className="text-sm font-semibold text-[#18181B]">
+            {copy.systemManagement}
+          </span>
         </div>
         <div className="h-2" />
         <nav className="flex flex-col gap-1">
@@ -55,7 +84,7 @@ export default function SystemLayout({ children }: { children: ReactNode }) {
                 )}
               >
                 <Icon size={18} />
-                {item.label}
+                {labels[item.href] ?? item.label}
               </Link>
             )
           })}

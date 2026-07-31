@@ -1,7 +1,7 @@
 """
 KnowledgeBase repository
 """
-from sqlalchemy import select, func
+from sqlalchemy import false, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.knowledge_base import KnowledgeBase
@@ -32,11 +32,16 @@ class KnowledgeBaseRepository:
         tenant_id: str,
         page: int = 1,
         per_page: int = 10,
+        allowed_ids: list[int] | None = None,
     ) -> tuple[list[KnowledgeBase], int]:
-        base_filter = (
+        base_filter: list = [
             KnowledgeBase.tenant_id == tenant_id,
             KnowledgeBase.status != "deleted",
-        )
+        ]
+        if allowed_ids is not None:
+            base_filter.append(
+                KnowledgeBase.id.in_(allowed_ids) if allowed_ids else false()
+            )
 
         total_result = await db.execute(
             select(func.count()).select_from(KnowledgeBase).where(*base_filter)

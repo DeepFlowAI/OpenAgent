@@ -9,7 +9,12 @@ from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.deps import get_db, require_scope
+from app.db.deps import (
+    AuthContext,
+    get_db,
+    require_admin_session_or_scope,
+    require_agent_access,
+)
 from app.core.exceptions import NotFoundError
 from app.routers.v1.sse import with_sse_heartbeat
 from app.schemas.channel import ChannelOptionListResponse
@@ -33,7 +38,7 @@ router = APIRouter(
 @router.get("", response_model=ConversationListResponse)
 async def list_conversations(
     agent_id: int,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(require_agent_access("chat")),
     page: int = 1,
     per_page: int = 10,
     start_time: datetime | None = None,
@@ -51,7 +56,7 @@ async def list_conversations(
     """List conversations for an agent with filtering and pagination"""
     return await ConversationService.get_paginated(
         db,
-        tenant_id,
+        auth.tenant_id,
         agent_id,
         page=page,
         per_page=per_page,
@@ -71,7 +76,7 @@ async def list_conversations(
 @router.get("/export")
 async def export_conversations(
     agent_id: int,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(require_agent_access("chat")),
     start_time: datetime | None = None,
     end_time: datetime | None = None,
     status_filter: str | None = None,
@@ -87,7 +92,7 @@ async def export_conversations(
     """Export all filtered conversation messages as CSV."""
     csv_content = await ConversationService.export_messages_csv(
         db,
-        tenant_id,
+        auth.tenant_id,
         agent_id,
         start_time=start_time,
         end_time=end_time,
@@ -112,23 +117,25 @@ async def export_conversations(
 @router.get("/channel-options", response_model=ChannelOptionListResponse)
 async def list_conversation_channel_options(
     agent_id: int,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(require_agent_access("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """List Web SDK channel options bound to the current agent."""
-    return await ConversationService.get_channel_options(db, tenant_id, agent_id)
+    return await ConversationService.get_channel_options(
+        db, auth.tenant_id, agent_id
+    )
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetailResponse)
 async def get_conversation(
     agent_id: int,
     conversation_id: int,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(require_agent_access("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Get conversation detail by ID"""
     conv = await ConversationService.get_by_id(db, conversation_id)
-    if conv["tenant_id"] != tenant_id:
+    if conv["tenant_id"] != auth.tenant_id or conv["agent_id"] != agent_id:
         raise NotFoundError("Conversation not found")
     return conv
 
@@ -141,11 +148,11 @@ async def get_conversation(
 async def create_conversation(
     agent_id: int,
     body: ConversationCreate,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(require_admin_session_or_scope("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new conversation"""
-    body.tenant_id = tenant_id
+    body.tenant_id = auth.tenant_id
     return await ConversationService.create(db, body)
 
 
@@ -153,12 +160,12 @@ async def create_conversation(
 async def end_conversation(
     agent_id: int,
     conversation_id: int,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(require_admin_session_or_scope("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Mark a conversation as ended"""
     conv = await ConversationService.get_by_id(db, conversation_id)
-    if conv["tenant_id"] != tenant_id:
+    if conv["tenant_id"] != auth.tenant_id or conv["agent_id"] != agent_id:
         raise NotFoundError("Conversation not found")
     return await ConversationService.end_conversation(db, conversation_id)
 
@@ -169,7 +176,7 @@ async def submit_tool_result(
     conversation_id: int,
     body: ToolResultSubmit,
     request: Request,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(require_admin_session_or_scope("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Submit the external result for a pending tool call."""
@@ -179,7 +186,7 @@ async def submit_tool_result(
                 db,
                 agent_id=agent_id,
                 conversation_id=conversation_id,
-                tenant_id=tenant_id,
+                tenant_id=auth.tenant_id,
                 data=body,
                 is_disconnected_cb=request.is_disconnected,
             )

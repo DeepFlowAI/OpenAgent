@@ -4,8 +4,15 @@ KnowledgeBase router
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ForbiddenError
-from app.db.deps import AuthContext, get_db, resolve_auth
+from app.core.exceptions import ForbiddenError, NotFoundError
+from app.db.deps import (
+    AuthContext,
+    get_db,
+    require_admin_session_or_scope,
+    require_knowledge_base_access,
+    resolve_auth,
+)
+from app.repositories.account_repository import AccountRepository
 from app.schemas.knowledge_base import (
     KnowledgeBaseCreate,
     KnowledgeBaseUpdate,
@@ -33,7 +40,16 @@ async def list_knowledge_bases(
         return await KnowledgeBaseService.get_public_paginated(
             db, auth.tenant_id, page, per_page
         )
-    return await KnowledgeBaseService.get_paginated(db, auth.tenant_id, page, per_page)
+    allowed_ids = None
+    if auth.role == "quality_inspector":
+        if auth.account_id is None:
+            raise ForbiddenError("You do not have access to knowledge bases")
+        allowed_ids = await AccountRepository.get_knowledge_base_ids(
+            db, auth.account_id
+        )
+    return await KnowledgeBaseService.get_paginated(
+        db, auth.tenant_id, page, per_page, allowed_ids
+    )
 
 
 @router.post(
@@ -41,37 +57,51 @@ async def list_knowledge_bases(
 )
 async def create_knowledge_base(
     body: KnowledgeBaseCreate,
+    auth: AuthContext = Depends(require_admin_session_or_scope("config")),
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new knowledge base"""
+    body.tenant_id = auth.tenant_id
     return await KnowledgeBaseService.create(db, body)
 
 
 @router.get("/{kb_id}", response_model=KnowledgeBaseResponse)
 async def get_knowledge_base(
     kb_id: int,
+    auth: AuthContext = Depends(require_knowledge_base_access("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Get knowledge base by ID"""
-    return await KnowledgeBaseService.get_by_id(db, kb_id)
+    item = await KnowledgeBaseService.get_by_id(db, kb_id)
+    if item.tenant_id != auth.tenant_id:
+        raise NotFoundError("Knowledge base not found")
+    return item
 
 
 @router.put("/{kb_id}", response_model=KnowledgeBaseResponse)
 async def update_knowledge_base(
     kb_id: int,
     body: KnowledgeBaseUpdate,
+    auth: AuthContext = Depends(require_admin_session_or_scope("config")),
     db: AsyncSession = Depends(get_db),
 ):
     """Update knowledge base"""
+    item = await KnowledgeBaseService.get_by_id(db, kb_id)
+    if item.tenant_id != auth.tenant_id:
+        raise NotFoundError("Knowledge base not found")
     return await KnowledgeBaseService.update(db, kb_id, body)
 
 
 @router.delete("/{kb_id}", status_code=status.HTTP_200_OK)
 async def delete_knowledge_base(
     kb_id: int,
+    auth: AuthContext = Depends(require_admin_session_or_scope("config")),
     db: AsyncSession = Depends(get_db),
 ):
     """Soft delete knowledge base"""
+    item = await KnowledgeBaseService.get_by_id(db, kb_id)
+    if item.tenant_id != auth.tenant_id:
+        raise NotFoundError("Knowledge base not found")
     await KnowledgeBaseService.delete(db, kb_id)
     return {"message": "Deleted successfully"}
 
@@ -79,10 +109,13 @@ async def delete_knowledge_base(
 @router.get("/{kb_id}/meta-fields")
 async def get_kb_meta_fields(
     kb_id: int,
+    auth: AuthContext = Depends(require_knowledge_base_access("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Get available doc_meta and slice_meta field names for a knowledge base."""
     kb = await KnowledgeBaseService.get_by_id(db, kb_id)
+    if kb.tenant_id != auth.tenant_id:
+        raise NotFoundError("Knowledge base not found")
     if kb.schema_fields:
         result: dict[str, list[str]] = {"doc_meta": [], "slice_meta": []}
         sf = kb.schema_fields
@@ -98,6 +131,7 @@ async def get_kb_meta_fields(
 @router.get("/{kb_id}/meta-schema")
 async def get_kb_meta_schema(
     kb_id: int,
+    auth: AuthContext = Depends(require_knowledge_base_access("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Get full field definitions (name, type, values) for a knowledge base.
@@ -106,6 +140,8 @@ async def get_kb_meta_schema(
     name lists with default type ``keyword`` → fallback to JSONB key inference.
     """
     kb = await KnowledgeBaseService.get_by_id(db, kb_id)
+    if kb.tenant_id != auth.tenant_id:
+        raise NotFoundError("Knowledge base not found")
     sf = kb.schema_fields or {}
 
     doc_defs = sf.get("doc_meta_definitions")

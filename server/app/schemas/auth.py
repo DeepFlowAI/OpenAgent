@@ -1,7 +1,9 @@
 """
 Auth request/response schemas.
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.schemas.account import validate_password
 
 
 class LoginRequest(BaseModel):
@@ -23,6 +25,7 @@ class LoginUserInfo(BaseModel):
     id: int
     tenant_id: str
     username: str
+    email: str | None = None
     role: str
 
 
@@ -36,7 +39,9 @@ class ResetPasswordRequest(BaseModel):
     tenant: str = Field(..., min_length=2, max_length=64)
     username: str = Field(..., min_length=1, max_length=64)
     verify_code: str = Field(..., min_length=6, max_length=6)
-    new_password: str = Field(..., min_length=8, max_length=72)
+    new_password: str = Field(..., min_length=8, max_length=32)
+
+    _password = field_validator("new_password")(validate_password)
 
 
 class MessageResponse(BaseModel):
@@ -47,4 +52,5 @@ class MeResponse(BaseModel):
     id: int
     tenant_id: str
     username: str
+    email: str | None = None
     role: str

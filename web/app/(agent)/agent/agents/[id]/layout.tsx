@@ -13,9 +13,12 @@ import {
   IconTool,
   IconMessages,
   IconChartBar,
+  IconClipboardCheck,
 } from '@tabler/icons-react'
 import { ChatTestFab } from '@/app/components/features/chat-test-fab'
 import { ChatTestDrawer } from '@/app/components/features/chat-test-drawer'
+import { ForbiddenState } from '@/app/components/base/forbidden-state'
+import { useAuthStore } from '@/context/auth-store'
 
 const secondNavItems = [
   {
@@ -32,6 +35,11 @@ const secondNavItems = [
     label: '会话记录',
     segment: 'conversations',
     icon: IconMessages,
+  },
+  {
+    label: '质检工作台',
+    segment: 'quality',
+    icon: IconClipboardCheck,
   },
   {
     label: '会话报表',
@@ -52,6 +60,7 @@ export default function AgentDetailLayout({ children }: { children: ReactNode })
   const pathname = usePathname()
   const agentId = params.id as string
   const basePath = `/agent/agents/${agentId}`
+  const isAdmin = useAuthStore((state) => state.user?.role === 'admin')
 
   const { data: agent } = useAgent(Number(agentId))
   const [chatOpen, setChatOpen] = useState(false)
@@ -64,6 +73,19 @@ export default function AgentDetailLayout({ children }: { children: ReactNode })
     pathname.includes(`/${item.segment}`)
   )
   const isEngineActive = activeSecondNav?.segment === 'engine'
+  const isRestrictedPath =
+    !isAdmin &&
+    (pathname.includes('/engine') || pathname.includes('/tools'))
+
+  if (isRestrictedPath) {
+    return (
+      <ForbiddenState
+        returnHref={`${basePath}/conversations`}
+        returnLabel="返回会话记录"
+        returnLabelEn="Back to conversations"
+      />
+    )
+  }
 
   return (
     <div className="flex h-full">
@@ -77,7 +99,15 @@ export default function AgentDetailLayout({ children }: { children: ReactNode })
           <span className="truncate">{agent?.name || 'Agent'}</span>
         </Link>
         <div className="h-2" />
-        {secondNavItems.map((item) => {
+        {secondNavItems
+          .filter(
+            (item) =>
+              isAdmin ||
+              item.segment === 'conversations' ||
+              item.segment === 'quality' ||
+              item.segment === 'conversation-report'
+          )
+          .map((item) => {
           const Icon = item.icon
           const href =
             item.segment === 'engine'
@@ -99,11 +129,11 @@ export default function AgentDetailLayout({ children }: { children: ReactNode })
               {item.label}
             </Link>
           )
-        })}
+          })}
       </aside>
 
       {/* Third-level nav (only for engine) */}
-      {isEngineActive && (
+      {isAdmin && isEngineActive && (
         <aside className="flex w-[180px] shrink-0 flex-col gap-0.5 border-r border-[#ECECEC] bg-[#FAFAFA] px-3 py-6">
           <span className="px-3 text-[11px] font-semibold tracking-[1px] text-[#A1A1AA]">
             核心引擎
@@ -134,13 +164,17 @@ export default function AgentDetailLayout({ children }: { children: ReactNode })
       <div className="flex-1 overflow-auto">{children}</div>
 
       {/* Chat test FAB + Drawer */}
-      {!chatOpen && <ChatTestFab onClick={() => setChatOpen(true)} />}
-      <ChatTestDrawer
-        open={chatOpen}
-        onClose={() => setChatOpen(false)}
-        agentId={Number(agentId)}
-        conversationSettings={conversationSettings}
-      />
+      {isAdmin && (
+        <>
+          {!chatOpen && <ChatTestFab onClick={() => setChatOpen(true)} />}
+          <ChatTestDrawer
+            open={chatOpen}
+            onClose={() => setChatOpen(false)}
+            agentId={Number(agentId)}
+            conversationSettings={conversationSettings}
+          />
+        </>
+      )}
     </div>
   )
 }

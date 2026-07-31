@@ -12,6 +12,7 @@ import {
   useDeleteKnowledgeBase,
 } from '@/service/use-knowledge-base'
 import { useAuthStore } from '@/context/auth-store'
+import { useAppLanguage } from '@/utils/use-app-language'
 import { IconPlus, IconPencil, IconTrash } from '@tabler/icons-react'
 import type { KnowledgeBase } from '@/models/knowledge-base'
 
@@ -19,6 +20,8 @@ export default function KnowledgeSpacePage() {
   const router = useRouter()
   const { toast } = useToast()
   const tenantId = useAuthStore((s) => s.user?.tenant_id) || ''
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
+  const language = useAppLanguage()
   const { data, isLoading } = useKnowledgeBases(tenantId)
   const deleteMutation = useDeleteKnowledgeBase()
 
@@ -53,12 +56,12 @@ export default function KnowledgeSpacePage() {
     <div className="px-12 py-10">
       <div className="mb-6 flex items-center justify-between">
         <h1 className="text-lg font-bold text-foreground">知识空间</h1>
-        <Link href="/knowledge-space/new">
+        {isAdmin && <Link href="/knowledge-space/new">
           <Button>
             <IconPlus size={16} className="mr-1.5" />
             新建知识库
           </Button>
-        </Link>
+        </Link>}
       </div>
 
       {isLoading ? (
@@ -68,14 +71,18 @@ export default function KnowledgeSpacePage() {
       ) : items.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20">
           <p className="mb-4 text-sm text-muted-foreground">
-            暂无知识库，绑定 Git 仓库即可开始
+            {isAdmin
+              ? '暂无知识库，绑定 Git 仓库即可开始'
+              : language === 'en'
+                ? 'You do not have access to any knowledge bases. Contact an administrator.'
+                : '暂未获得知识库权限，请联系管理员'}
           </p>
-          <Link href="/knowledge-space/new">
+          {isAdmin && <Link href="/knowledge-space/new">
             <Button>
               <IconPlus size={16} className="mr-1.5" />
               新建知识库
             </Button>
-          </Link>
+          </Link>}
         </div>
       ) : (
         <div className="overflow-hidden rounded-lg border border-border">
@@ -97,9 +104,11 @@ export default function KnowledgeSpacePage() {
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">
                   文档数
                 </th>
-                <th className="px-4 py-3 text-right font-medium text-muted-foreground">
-                  操作
-                </th>
+                {isAdmin && (
+                  <th className="px-4 py-3 text-right font-medium text-muted-foreground">
+                    操作
+                  </th>
+                )}
               </tr>
             </thead>
             <tbody>
@@ -126,7 +135,7 @@ export default function KnowledgeSpacePage() {
                   <td className="px-4 py-3 text-muted-foreground">
                     {kb.document_count}
                   </td>
-                  <td className="px-4 py-3">
+                  {isAdmin && <td className="px-4 py-3">
                     <div
                       className="flex items-center justify-end gap-1"
                       onClick={(e) => e.stopPropagation()}
@@ -147,7 +156,7 @@ export default function KnowledgeSpacePage() {
                         <IconTrash size={16} />
                       </button>
                     </div>
-                  </td>
+                  </td>}
                 </tr>
               ))}
             </tbody>

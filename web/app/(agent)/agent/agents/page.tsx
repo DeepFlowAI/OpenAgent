@@ -14,6 +14,7 @@ import {
   useUpdateAgentStatus,
 } from '@/service/use-agent'
 import { useAuthStore } from '@/context/auth-store'
+import { useAppLanguage } from '@/utils/use-app-language'
 import {
   IconPlus,
   IconPencil,
@@ -28,6 +29,8 @@ export default function AgentListPage() {
   const router = useRouter()
   const { toast } = useToast()
   const tenantId = useAuthStore((s) => s.user?.tenant_id) || ''
+  const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
+  const language = useAppLanguage()
 
   const [activeTab, setActiveTab] = useState<TabKey>('active')
   const { data, isLoading } = useAgents(tenantId, activeTab)
@@ -110,15 +113,19 @@ export default function AgentListPage() {
       {/* Header */}
       <div className="mb-5 flex items-center justify-between">
         <h1 className="text-2xl font-bold text-foreground">Agent</h1>
-        <Button onClick={() => setCreateModalOpen(true)}>
-          <IconPlus size={16} className="mr-2" />
-          新建 Agent
-        </Button>
+        {isAdmin && (
+          <Button onClick={() => setCreateModalOpen(true)}>
+            <IconPlus size={16} className="mr-2" />
+            新建 Agent
+          </Button>
+        )}
       </div>
 
       {/* Tabs */}
       <div className="mb-5 flex gap-0 border-b border-[#ECECEC]">
-        {tabs.map((tab, index) => (
+        {tabs
+          .filter((tab) => isAdmin || tab.key === 'active')
+          .map((tab, index) => (
           <button
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
@@ -130,7 +137,7 @@ export default function AgentListPage() {
           >
             {tab.label}
           </button>
-        ))}
+          ))}
       </div>
 
       {/* Content */}
@@ -142,10 +149,14 @@ export default function AgentListPage() {
         <div className="flex flex-col items-center justify-center py-20">
           <p className="mb-4 text-sm text-muted-foreground">
             {activeTab === 'active'
-              ? '暂无可用 Agent，创建一个开始使用'
+              ? isAdmin
+                ? '暂无可用 Agent，创建一个开始使用'
+                : language === 'en'
+                  ? 'You do not have access to any Agents. Contact an administrator.'
+                  : '暂未获得 Agent 权限，请联系管理员'
               : '暂无停用 Agent'}
           </p>
-          {activeTab === 'active' && (
+          {activeTab === 'active' && isAdmin && (
             <Button onClick={() => setCreateModalOpen(true)}>
               <IconPlus size={16} className="mr-2" />
               新建 Agent
@@ -169,9 +180,11 @@ export default function AgentListPage() {
                 <th className="h-12 w-[140px] px-6 text-left text-[13px] font-semibold text-[#404040]">
                   更新时间
                 </th>
-                <th className="h-12 w-20 px-6 text-center text-[13px] font-semibold text-[#404040]">
-                  操作
-                </th>
+                {isAdmin && (
+                  <th className="h-12 w-20 px-6 text-center text-[13px] font-semibold text-[#404040]">
+                    操作
+                  </th>
+                )}
               </tr>
             </thead>
             <tbody>
@@ -179,7 +192,13 @@ export default function AgentListPage() {
                 <tr
                   key={agent.id}
                   className="cursor-pointer border-t border-[#F0F0F0] transition-colors hover:bg-[#FAFAFA]"
-                  onClick={() => router.push(`/agent/agents/${agent.id}`)}
+                  onClick={() =>
+                    router.push(
+                      isAdmin
+                        ? `/agent/agents/${agent.id}`
+                        : `/agent/agents/${agent.id}/conversations`
+                    )
+                  }
                 >
                   <td className="h-14 px-6">
                     <span className="text-sm font-medium text-foreground">
@@ -195,7 +214,7 @@ export default function AgentListPage() {
                   <td className="h-14 w-[140px] px-6 text-sm text-muted-foreground">
                     {formatDate(agent.updated_at)}
                   </td>
-                  <td className="h-14 w-20 px-6">
+                  {isAdmin && <td className="h-14 w-20 px-6">
                     <div
                       className="flex items-center justify-center gap-3"
                       onClick={(e) => e.stopPropagation()}
@@ -228,7 +247,7 @@ export default function AgentListPage() {
                         </button>
                       )}
                     </div>
-                  </td>
+                  </td>}
                 </tr>
               ))}
             </tbody>

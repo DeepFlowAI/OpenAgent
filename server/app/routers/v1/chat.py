@@ -40,6 +40,8 @@ async def chat(
     """
     if auth.scopes is not None and "chat" not in auth.scopes:
         raise ForbiddenError("API key lacks required scope: chat")
+    if auth.role == "quality_inspector":
+        raise ForbiddenError("Quality inspectors cannot use chat testing")
     if body.attachments and auth.scopes is None:
         raise ForbiddenError("Attachments are only supported with an API key")
 

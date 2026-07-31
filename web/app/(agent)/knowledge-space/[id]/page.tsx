@@ -1,6 +1,6 @@
 'use client'
 
-import { use, useCallback, useEffect, useRef, useState } from 'react'
+import { use, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { cn } from '@/utils/classnames'
@@ -22,6 +22,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { IconArrowLeft, IconRefresh, IconChevronDown, IconPlayerStop } from '@tabler/icons-react'
 import { PermissionRulesTab } from '@/app/components/features/permission-rules-tab'
 import { KnowledgeBaseQaTab } from '@/app/components/features/knowledge-base-qa-tab'
+import { useAuthStore } from '@/context/auth-store'
 
 const tabs = [
   { key: 'qa', label: 'QA' },
@@ -47,6 +48,14 @@ export default function KnowledgeBaseDetailPage({
   const syncDropdownRef = useRef<HTMLDivElement>(null)
   const { toast } = useToast()
   const qc = useQueryClient()
+  const isAdmin = useAuthStore((state) => state.user?.role === 'admin')
+  const visibleTabs = useMemo(
+    () =>
+      isAdmin
+        ? tabs
+        : tabs.filter((tab) => tab.key === 'documents'),
+    [isAdmin]
+  )
 
   const { data: kb, isLoading: kbLoading } = useKnowledgeBase(kbId)
   const { data: logsData } = useSyncLogs(kbId)
@@ -59,8 +68,12 @@ export default function KnowledgeBaseDetailPage({
 
   useEffect(() => {
     const tab = searchParams.get('tab')
-    setActiveTab(tabs.some((item) => item.key === tab) ? tab as TabKey : 'documents')
-  }, [searchParams])
+    setActiveTab(
+      visibleTabs.some((item) => item.key === tab)
+        ? (tab as TabKey)
+        : 'documents'
+    )
+  }, [searchParams, visibleTabs])
 
   const selectTab = useCallback((tab: TabKey) => {
     setActiveTab(tab)
@@ -192,7 +205,7 @@ export default function KnowledgeBaseDetailPage({
             </Link>
             <h1 className="text-lg font-semibold text-foreground">{kb.name}</h1>
           </div>
-          <div className="flex items-center gap-2">
+          {isAdmin && <div className="flex items-center gap-2">
             <Link href={`/knowledge-space/${kbId}/edit`}>
               <Button variant="outline">编辑</Button>
             </Link>
@@ -248,10 +261,10 @@ export default function KnowledgeBaseDetailPage({
                 停止同步
               </Button>
             )}
-          </div>
+          </div>}
         </div>
         <div className="flex gap-6">
-          {tabs.map((tab) => (
+          {visibleTabs.map((tab) => (
             <button
               key={tab.key}
               onClick={() => selectTab(tab.key)}

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
-from app.db.deps import get_db, require_scope
+from app.db.deps import AuthContext, get_db, require_knowledge_base_access
 from app.repositories.knowledge_base_repository import KnowledgeBaseRepository
 from app.schemas.search import SearchRequest, SearchResponse
 from app.services.search_service import SearchService
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/knowledge-bases", tags=["Search"])
 async def search_knowledge_base(
     kb_id: int,
     body: SearchRequest,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(require_knowledge_base_access("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Search slices in a knowledge base (hybrid: BM25 + vector + reranker).
@@ -27,7 +27,7 @@ async def search_knowledge_base(
     subject_context is loaded automatically from the conversation.
     """
     kb = await KnowledgeBaseRepository.get_by_id(db, kb_id)
-    if not kb or kb.status == "deleted" or kb.tenant_id != tenant_id:
+    if not kb or kb.status == "deleted" or kb.tenant_id != auth.tenant_id:
         raise NotFoundError("Knowledge base not found")
 
     subject_context = None

@@ -61,6 +61,7 @@ services:
       DEFAULT_TENANT_ID: ${DEFAULT_TENANT_ID:-default}
       DEFAULT_TENANT_NAME: ${DEFAULT_TENANT_NAME:-Default Workspace}
       DEFAULT_ADMIN_USERNAME: ${DEFAULT_ADMIN_USERNAME:-admin}
+      DEFAULT_ADMIN_EMAIL: ${DEFAULT_ADMIN_EMAIL:-admin@example.com}
       DEFAULT_ADMIN_PASSWORD: ${DEFAULT_ADMIN_PASSWORD:-Admin123456}
       # ── LLM provider keys (set whichever you need) ───────────────────
       LLM_API_KEY: ${LLM_API_KEY:-}

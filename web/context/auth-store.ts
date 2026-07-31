@@ -5,7 +5,8 @@ type User = {
   id: number
   tenant_id: string
   username: string
-  role: string
+  email: string | null
+  role: 'admin' | 'quality_inspector'
 }
 
 type AuthState = {

@@ -14,8 +14,17 @@ from app.models.super_admin import SuperAdmin  # noqa: F401
 from app.models.api_key import ApiKey  # noqa: F401
 from app.models.conversation import Conversation  # noqa: F401
 from app.models.conversation_step import ConversationStep  # noqa: F401
+from app.models.conversation_inspection import (  # noqa: F401
+    ConversationStepInspection,
+    ConversationStepInspectionHistory,
+)
 from app.models.channel import Channel  # noqa: F401
 from app.models.kb_permission_rule import KbPermissionRule  # noqa: F401
 from app.models.help_center import HelpCenter  # noqa: F401
 from app.models.help_center_tab import HelpCenterTab  # noqa: F401
 from app.models.service_hours import ServiceHours  # noqa: F401
+from app.models.tenant_account import (  # noqa: F401
+    TenantAccount,
+    TenantAccountAgent,
+    TenantAccountKnowledgeBase,
+)

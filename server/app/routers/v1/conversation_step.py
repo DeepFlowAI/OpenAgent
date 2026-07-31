@@ -4,7 +4,13 @@ ConversationStep router — execution log query and write APIs
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.deps import get_db, require_api_key_scope, require_scope
+from app.db.deps import (
+    AuthContext,
+    get_db,
+    require_admin_session_or_scope,
+    require_agent_access,
+    require_api_key_scope,
+)
 from app.schemas.conversation_step import (
     ConversationTimelineResponse,
     StepDetailResponse,
@@ -14,6 +20,8 @@ from app.schemas.conversation_step import (
     StepUpdate,
 )
 from app.services.conversation_step_service import ConversationStepService
+from app.services.conversation_service import ConversationService
+from app.core.exceptions import NotFoundError
 
 router = APIRouter(
     prefix="/agents/{agent_id}/conversations/{conversation_id}/steps",
@@ -25,10 +33,16 @@ router = APIRouter(
 async def get_conversation_timeline(
     agent_id: int,
     conversation_id: int,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(require_agent_access("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Get conversation execution timeline (lightweight, for log page)"""
+    conversation = await ConversationService.get_by_id(db, conversation_id)
+    if (
+        conversation["tenant_id"] != auth.tenant_id
+        or conversation["agent_id"] != agent_id
+    ):
+        raise NotFoundError("Conversation not found")
     return await ConversationStepService.get_timeline(db, conversation_id)
 
 
@@ -37,11 +51,25 @@ async def get_step_detail(
     agent_id: int,
     conversation_id: int,
     step_id: int,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(require_agent_access("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Get full step detail (for LLM request/response modal)"""
-    return await ConversationStepService.get_step_detail(db, step_id)
+    conversation = await ConversationService.get_by_id(db, conversation_id)
+    if (
+        conversation["tenant_id"] != auth.tenant_id
+        or conversation["agent_id"] != agent_id
+    ):
+        raise NotFoundError("Conversation not found")
+    step = await ConversationStepService.get_step_detail(db, step_id)
+    step_conversation_id = (
+        step.get("conversation_id")
+        if isinstance(step, dict)
+        else step.conversation_id
+    )
+    if step_conversation_id != conversation_id:
+        raise NotFoundError("Step not found")
+    return step
 
 
 @router.post("/{step_id}/feedback", response_model=StepFeedbackResponse)
@@ -73,12 +101,12 @@ async def create_step(
     agent_id: int,
     conversation_id: int,
     body: StepCreate,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(require_admin_session_or_scope("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Add a step to a conversation (used by agent engine)"""
     return await ConversationStepService.create_step(
-        db, conversation_id, tenant_id, body
+        db, conversation_id, auth.tenant_id, body
     )
 
 
@@ -88,7 +116,7 @@ async def update_step(
     conversation_id: int,
     step_id: int,
     body: StepUpdate,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(require_admin_session_or_scope("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Update an existing step (e.g. when LLM response arrives)"""

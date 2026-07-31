@@ -37,7 +37,7 @@ class PasswordResetRepository:
     @staticmethod
     async def mark_used(db: AsyncSession, item: PasswordResetCode) -> None:
         item.used = True
-        await db.commit()
+        await db.flush()
 
     @staticmethod
     async def count_recent(

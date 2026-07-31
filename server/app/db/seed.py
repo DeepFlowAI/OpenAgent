@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.configs.settings import settings
 from app.models.tenant import Tenant, generate_tenant_id
+from app.models.tenant_account import TenantAccount
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +51,22 @@ async def _ensure_default_tenant(db: AsyncSession) -> None:
         tenant_id=settings.DEFAULT_TENANT_ID,
         name=settings.DEFAULT_TENANT_NAME,
         admin_username=settings.DEFAULT_ADMIN_USERNAME,
+        admin_email=settings.DEFAULT_ADMIN_EMAIL,
         admin_password_hash=password_hash,
     )
     db.add(tenant)
     await db.flush()
+    db.add(
+        TenantAccount(
+            tenant_id=tenant.tenant_id,
+            username=tenant.admin_username,
+            username_normalized=tenant.admin_username.lower(),
+            email=tenant.admin_email,
+            email_normalized=tenant.admin_email.lower(),
+            role="admin",
+            password_hash=password_hash,
+        )
+    )
 
     logger.warning(
         "First-run init: created default tenant '%s' (id=%s) with admin '%s'. "

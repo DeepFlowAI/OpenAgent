@@ -1,6 +1,6 @@
 'use client'
 
-import { type ReactNode, useEffect } from 'react'
+import { type ReactNode, useEffect, useId, useRef } from 'react'
 import { cn } from '@/utils/classnames'
 import { Button } from '@/app/components/base/button'
 
@@ -14,6 +14,9 @@ type ModalProps = {
 }
 
 export function Modal({ open, onClose, title, children, footer, className }: ModalProps) {
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const titleId = useId()
+
   useEffect(() => {
     if (!open) return
     const handler = (e: KeyboardEvent) => {
@@ -23,18 +26,38 @@ export function Modal({ open, onClose, title, children, footer, className }: Mod
     return () => document.removeEventListener('keydown', handler)
   }, [open, onClose])
 
+  useEffect(() => {
+    if (!open) return
+    const previousFocus = document.activeElement as HTMLElement | null
+    const frame = window.requestAnimationFrame(() => {
+      const target = dialogRef.current?.querySelector<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex="0"]'
+      )
+      ;(target ?? dialogRef.current)?.focus()
+    })
+    return () => {
+      window.cancelAnimationFrame(frame)
+      previousFocus?.focus()
+    }
+  }, [open])
+
   if (!open) return null
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/50" onClick={onClose} />
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         className={cn(
           'relative z-10 w-[420px] rounded-xl border border-[#E5E5E5] bg-white p-6 shadow-[0_8px_24px_rgba(0,0,0,0.08)]',
           className
         )}
       >
-        <h2 className="text-lg font-semibold text-[#1a1a1a]">{title}</h2>
+        <h2 id={titleId} className="text-lg font-semibold text-[#1a1a1a]">{title}</h2>
         <div className="mt-5">{children}</div>
         {footer && <div className="mt-5 flex justify-end gap-3">{footer}</div>}
       </div>

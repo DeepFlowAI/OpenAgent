@@ -8,7 +8,8 @@ export type LoginUser = {
   id: number
   tenant_id: string
   username: string
-  role: string
+  email: string | null
+  role: 'admin' | 'quality_inspector'
 }
 
 export type LoginResponse = {

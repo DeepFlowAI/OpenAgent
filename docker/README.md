@@ -55,6 +55,7 @@ docker compose up -d
 ## 生产部署清单
 
 - [ ] `SECRET_KEY` 用强随机值（32 字节 hex）
+- [ ] `DEFAULT_ADMIN_EMAIL` 改为管理员可接收找回密码邮件的地址
 - [ ] `DEFAULT_ADMIN_PASSWORD` 不要使用默认值 —— 首次登录后立即修改
 - [ ] 不要把 `5001`、`3000` 端口直接对外，前面用 nginx / Caddy / Traefik 反代到 https
 - [ ] `PUBLIC_API_URL` 改成你的公网域名（浏览器侧要能访问）

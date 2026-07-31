@@ -12,10 +12,14 @@ class KnowledgeBaseService:
 
     @staticmethod
     async def get_paginated(
-        db: AsyncSession, tenant_id: str, page: int = 1, per_page: int = 10
+        db: AsyncSession,
+        tenant_id: str,
+        page: int = 1,
+        per_page: int = 10,
+        allowed_ids: list[int] | None = None,
     ) -> dict:
         items, total = await KnowledgeBaseRepository.get_paginated(
-            db, tenant_id, page, per_page
+            db, tenant_id, page, per_page, allowed_ids
         )
         pages = (total + per_page - 1) // per_page
         return {

@@ -7,7 +7,6 @@ from app.db.deps import (
     AuthContext,
     get_db,
     require_admin_session_or_scope,
-    require_user_session_or_scope,
 )
 from app.schemas.knowledge_base_qa_directory import (
     KnowledgeBaseQaDirectoryCreate,
@@ -24,7 +23,7 @@ router = APIRouter(
     tags=["KnowledgeBaseQaDirectories"],
 )
 
-require_qa_directory_read = require_user_session_or_scope("config")
+require_qa_directory_read = require_admin_session_or_scope("config")
 require_qa_directory_write = require_admin_session_or_scope("config")
 
 

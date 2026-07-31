@@ -22,6 +22,7 @@ from app.core.security import create_access_token
 from app.repositories.password_reset_repository import PasswordResetRepository
 from app.repositories.tenant_repository import TenantRepository
 from app.repositories.super_admin_repository import SuperAdminRepository
+from app.repositories.account_repository import AccountRepository
 from app.libs.email import create_email_sender
 from app.schemas.auth import LoginRequest, SsoLoginRequest, SendCodeRequest, ResetPasswordRequest
 from app.schemas.super_admin import AdminLoginRequest
@@ -59,6 +60,30 @@ EMAIL_TEMPLATES = {
 
 
 class AuthService:
+    @staticmethod
+    def _account_token_payload(tenant, account) -> dict:
+        return {
+            "sub": str(account.id),
+            "tenant_id": tenant.tenant_id,
+            "username": account.username,
+            "email": account.email,
+            "role": account.role,
+            "account_version": account.session_version,
+        }
+
+    @staticmethod
+    def _account_response(tenant, account, token: str) -> dict:
+        return {
+            "token": token,
+            "user": {
+                "id": account.id,
+                "tenant_id": tenant.tenant_id,
+                "username": account.username,
+                "email": account.email,
+                "role": account.role,
+            },
+        }
+
     @staticmethod
     def _sso_secret() -> str:
         return settings.TENANT_PLATFORM_SSO_SECRET or settings.TENANT_PLATFORM_API_KEY
@@ -100,18 +125,38 @@ class AuthService:
         if tenant.status != "enabled":
             raise ForbiddenError("Tenant is disabled")
 
-        if tenant.admin_username != data.username:
-            raise UnauthorizedError("Invalid tenant, account or password")
+        identifier = data.username.strip()
+        account = await AccountRepository.get_by_identifier(
+            db, tenant.tenant_id, identifier
+        )
+        if account:
+            valid_password = bcrypt.checkpw(
+                data.password.encode("utf-8"),
+                account.password_hash.encode("utf-8"),
+            )
+            if not valid_password:
+                raise UnauthorizedError("Invalid tenant, account or password")
+            token = create_access_token(
+                AuthService._account_token_payload(tenant, account)
+            )
+            return AuthService._account_response(tenant, account, token)
 
-        if not bcrypt.checkpw(
+        # Compatibility fallback for a tenant that has not run the account
+        # migration yet. New sessions prefer tenant_accounts whenever present.
+        account_count = await AccountRepository.count_accounts(db, tenant.tenant_id)
+        if account_count > 0 or tenant.admin_username.lower() != identifier.lower() or not bcrypt.checkpw(
             data.password.encode("utf-8"),
             tenant.admin_password_hash.encode("utf-8"),
         ):
             raise UnauthorizedError("Invalid tenant, account or password")
-
         token = create_access_token(
-            {"sub": str(tenant.id), "tenant_id": tenant.tenant_id,
-             "username": tenant.admin_username, "role": "admin"}
+            {
+                "sub": str(tenant.id),
+                "tenant_id": tenant.tenant_id,
+                "username": tenant.admin_username,
+                "email": tenant.admin_email,
+                "role": "admin",
+            }
         )
         return {
             "token": token,
@@ -119,6 +164,7 @@ class AuthService:
                 "id": tenant.id,
                 "tenant_id": tenant.tenant_id,
                 "username": tenant.admin_username,
+                "email": tenant.admin_email,
                 "role": "admin",
             },
         }
@@ -134,9 +180,31 @@ class AuthService:
         if tenant.status != "enabled":
             raise ForbiddenError("Tenant is disabled")
 
+        account = await AccountRepository.get_primary_admin(
+            db, tenant.tenant_id, tenant.admin_username
+        )
+        account_count = await AccountRepository.count_accounts(
+            db, tenant.tenant_id
+        )
+        if not account and account_count > 0:
+            account = await AccountRepository.get_primary_admin(
+                db, tenant.tenant_id
+            )
+            if not account:
+                raise UnauthorizedError("No administrator account is available")
+        if account:
+            token = create_access_token(
+                AuthService._account_token_payload(tenant, account)
+            )
+            return AuthService._account_response(tenant, account, token)
         token = create_access_token(
-            {"sub": str(tenant.id), "tenant_id": tenant.tenant_id,
-             "username": tenant.admin_username, "role": "admin"}
+            {
+                "sub": str(tenant.id),
+                "tenant_id": tenant.tenant_id,
+                "username": tenant.admin_username,
+                "email": tenant.admin_email,
+                "role": "admin",
+            }
         )
         return {
             "token": token,
@@ -144,6 +212,7 @@ class AuthService:
                 "id": tenant.id,
                 "tenant_id": tenant.tenant_id,
                 "username": tenant.admin_username,
+                "email": tenant.admin_email,
                 "role": "admin",
             },
         }
@@ -185,9 +254,18 @@ class AuthService:
             raise NotFoundError("Tenant not found")
         if tenant.status != "enabled":
             raise ForbiddenError("Tenant is disabled")
-        if tenant.admin_username != data.username:
+        identifier = data.username.strip()
+        account = await AccountRepository.get_by_identifier(
+            db, tenant.tenant_id, identifier
+        )
+        account_count = await AccountRepository.count_accounts(db, tenant.tenant_id)
+        canonical_username = account.username if account else tenant.admin_username
+        email = account.email if account else tenant.admin_email
+        if not account and (
+            account_count > 0 or tenant.admin_username.lower() != identifier.lower()
+        ):
             raise NotFoundError("Account not found")
-        if not tenant.admin_email:
+        if not email:
             raise ValidationError(
                 "No email configured for this account. Contact your administrator."
             )
@@ -195,7 +273,7 @@ class AuthService:
         now = datetime.now(timezone.utc)
         since = now - timedelta(seconds=RATE_LIMIT_SECONDS)
         recent_count = await PasswordResetRepository.count_recent(
-            db, tenant.tenant_id, data.username, since
+            db, tenant.tenant_id, canonical_username, since
         )
         if recent_count > 0:
             raise BusinessError(
@@ -207,8 +285,8 @@ class AuthService:
         code = "".join(random.choices(string.digits, k=CODE_LENGTH))
         await PasswordResetRepository.create(db, {
             "tenant_id": tenant.tenant_id,
-            "username": data.username,
-            "email": tenant.admin_email,
+            "username": canonical_username,
+            "email": email,
             "code": code,
             "expires_at": now + timedelta(minutes=CODE_EXPIRE_MINUTES),
         })
@@ -217,16 +295,16 @@ class AuthService:
         tpl = EMAIL_TEMPLATES[locale]
         sender = create_email_sender()
         await sender.send(
-            to=tenant.admin_email,
+            to=email,
             subject=tpl["subject"],
             body=tpl["body"].format(code=code),
         )
 
         logger.info(
             "Verification code sent to %s for tenant %s",
-            tenant.admin_email, tenant.tenant_id,
+            email, tenant.tenant_id,
         )
-        return tenant.admin_email
+        return email
 
     @staticmethod
     async def reset_password(
@@ -237,11 +315,19 @@ class AuthService:
             raise NotFoundError("Tenant not found")
         if tenant.status != "enabled":
             raise ForbiddenError("Tenant is disabled")
-        if tenant.admin_username != data.username:
+        identifier = data.username.strip()
+        account = await AccountRepository.get_by_identifier(
+            db, tenant.tenant_id, identifier
+        )
+        account_count = await AccountRepository.count_accounts(db, tenant.tenant_id)
+        canonical_username = account.username if account else tenant.admin_username
+        if not account and (
+            account_count > 0 or tenant.admin_username.lower() != identifier.lower()
+        ):
             raise NotFoundError("Account not found")
 
         code_record = await PasswordResetRepository.find_valid_code(
-            db, tenant.tenant_id, data.username, data.verify_code
+            db, tenant.tenant_id, canonical_username, data.verify_code
         )
         if not code_record:
             raise ValidationError("Invalid or expired verification code")
@@ -251,9 +337,22 @@ class AuthService:
         new_hash = bcrypt.hashpw(
             data.new_password.encode("utf-8"), bcrypt.gensalt()
         ).decode("utf-8")
-        await TenantRepository.update(db, tenant, {"admin_password_hash": new_hash})
+        if account:
+            await AccountRepository.update(
+                db,
+                account,
+                {
+                    "password_hash": new_hash,
+                    "session_version": account.session_version + 1,
+                },
+            )
+            await db.commit()
+        else:
+            await TenantRepository.update(
+                db, tenant, {"admin_password_hash": new_hash}
+            )
 
         logger.info(
             "Password reset for tenant %s user %s",
-            tenant.tenant_id, data.username,
+            tenant.tenant_id, canonical_username,
         )

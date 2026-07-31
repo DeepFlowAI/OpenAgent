@@ -45,7 +45,12 @@ export default function AgentLayout({ children }: { children: ReactNode }) {
           </Link>
           <div className="h-px w-8 bg-[#E8E8E8]" />
           <nav className="flex flex-1 flex-col items-center gap-2">
-            {navItems.map((item) => {
+            {navItems
+              .filter(
+                (item) =>
+                  item.href !== '/system' || user?.role === 'admin'
+              )
+              .map((item) => {
               const Icon = item.icon
               const isActive = pathname.startsWith(item.href)
               return (
@@ -63,7 +68,7 @@ export default function AgentLayout({ children }: { children: ReactNode }) {
                   <Icon size={22} />
                 </Link>
               )
-            })}
+              })}
           </nav>
           <button
             onClick={handleLogout}

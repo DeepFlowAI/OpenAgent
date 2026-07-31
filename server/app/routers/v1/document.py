@@ -9,7 +9,11 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.deps import AuthContext, get_db, require_scope, resolve_auth
+from app.db.deps import (
+    AuthContext,
+    get_db,
+    require_knowledge_base_access,
+)
 from app.core.exceptions import ForbiddenError, NotFoundError
 from app.libs.doc_parser.parser import clean_markdown_for_reading
 from app.repositories.document_repository import DocumentRepository
@@ -36,7 +40,7 @@ _ORIGINAL_CHUNK = 64 * 1024
 @router.get("/{kb_id}/documents", response_model=DocumentListResponse | PublicDocumentListResponse)
 async def list_documents(
     kb_id: int,
-    auth: AuthContext = Depends(resolve_auth),
+    auth: AuthContext = Depends(require_knowledge_base_access("chat")),
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
@@ -70,6 +74,7 @@ async def list_documents(
 async def get_document(
     kb_id: int,
     doc_id: int,
+    auth: AuthContext = Depends(require_knowledge_base_access("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Get document detail"""
@@ -85,6 +90,7 @@ async def list_slices(
     doc_id: int,
     page: int = 1,
     per_page: int = 50,
+    auth: AuthContext = Depends(require_knowledge_base_access("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """List slices for a document"""
@@ -111,6 +117,7 @@ async def stream_document_original_file(
         False,
         description="If true, Content-Disposition is attachment (force download).",
     ),
+    auth: AuthContext = Depends(require_knowledge_base_access("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -141,6 +148,7 @@ async def stream_document_original_file(
 
     disposition_type = "attachment" if download else "inline"
     safe_name = quote(filename)
+    await db.close()
 
     async def byte_iter():
         async with httpx.AsyncClient(
@@ -179,7 +187,7 @@ async def stream_document_original_file(
 async def get_document_markdown(
     kb_id: int,
     doc_id: int,
-    tenant_id: str = Depends(require_scope("chat")),
+    auth: AuthContext = Depends(require_knowledge_base_access("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """Return the readable markdown content for a document.
@@ -188,7 +196,7 @@ async def get_document_markdown(
     response is clean markdown suitable for reading / rendering.
     """
     kb = await KnowledgeBaseRepository.get_by_id(db, kb_id)
-    if not kb or kb.status == "deleted" or kb.tenant_id != tenant_id:
+    if not kb or kb.status == "deleted" or kb.tenant_id != auth.tenant_id:
         raise NotFoundError("Knowledge base not found")
     doc = await DocumentRepository.get_by_id(db, doc_id)
     if not doc or doc.knowledge_base_id != kb_id:
@@ -205,6 +213,7 @@ async def list_sync_logs(
     kb_id: int,
     page: int = 1,
     per_page: int = 20,
+    auth: AuthContext = Depends(require_knowledge_base_access("chat")),
     db: AsyncSession = Depends(get_db),
 ):
     """List sync logs for a knowledge base"""

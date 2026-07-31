@@ -19,9 +19,10 @@ class AgentService:
         status: str = "active",
         page: int = 1,
         per_page: int = 10,
+        allowed_ids: list[int] | None = None,
     ) -> dict:
         items, total = await AgentRepository.get_paginated(
-            db, tenant_id, status, page, per_page
+            db, tenant_id, status, page, per_page, allowed_ids
         )
         pages = (total + per_page - 1) // per_page
         return {

@@ -190,6 +190,7 @@ class Settings(BaseSettings):
     DEFAULT_TENANT_ID: str = Field(default="default")
     DEFAULT_TENANT_NAME: str = Field(default="Default Workspace")
     DEFAULT_ADMIN_USERNAME: str = Field(default="admin")
+    DEFAULT_ADMIN_EMAIL: str = Field(default="admin@example.com")
     DEFAULT_ADMIN_PASSWORD: str = Field(default="Admin123456")
 
     # Tenant Platform API Key — only used by the closed-source tenants
